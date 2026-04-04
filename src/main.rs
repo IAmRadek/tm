@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::io::{self, Write};
 use tm::db::{Database, DbError};
+use tm::ipc::{notify_daemon, DaemonMessage};
 
 #[derive(Parser)]
 #[command(name = "tm")]
@@ -107,6 +108,11 @@ fn cmd_start(db: &Database, project: &str, task: &str, round: bool) {
     } else {
         println!("Started tracking: {} / {}", project, task);
     }
+    notify_daemon(&DaemonMessage::Started {
+        project: project.to_string(),
+        task: task.to_string(),
+        started_at: Utc::now(),
+    });
 }
 
 fn cmd_stop(db: &Database) {
@@ -119,6 +125,7 @@ fn cmd_stop(db: &Database) {
             } else {
                 println!("Stopped tracking.");
             }
+            notify_daemon(&DaemonMessage::Stopped);
         }
         Err(DbError::NoActiveEntry) => println!("No active time entry."),
         Err(e) => eprintln!("Error stopping time entry: {}", e),
@@ -145,7 +152,10 @@ fn cmd_status(db: &Database) {
 
 fn cmd_cancel(db: &Database) {
     match db.cancel_active_entry() {
-        Ok(_) => println!("Cancelled active entry."),
+        Ok(_) => {
+            println!("Cancelled active entry.");
+            notify_daemon(&DaemonMessage::Cancelled);
+        }
         Err(DbError::NoActiveEntry) => println!("No active time entry."),
         Err(e) => eprintln!("Error cancelling entry: {}", e),
     }
@@ -174,6 +184,11 @@ fn cmd_continue(db: &Database) {
     }
 
     println!("Continuing: {} / {}", project_name, task_name);
+    notify_daemon(&DaemonMessage::Continued {
+        project: project_name,
+        task: task_name,
+        started_at: Utc::now(),
+    });
 }
 
 fn cmd_clear(db: &Database) {
