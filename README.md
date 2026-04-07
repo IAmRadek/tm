@@ -36,6 +36,9 @@ tm continue
 # View log
 tm log
 
+# View log grouped by day
+tm log --daily
+
 # View billable times only
 tm log --billable
 

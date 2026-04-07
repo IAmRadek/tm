@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use tm::db::{Database, DbError};
 use tm::ipc::{notify_daemon, DaemonMessage};
@@ -47,6 +48,9 @@ enum Commands {
         /// Show only billable times (for billing reports)
         #[arg(short, long)]
         billable: bool,
+        /// Show entries grouped by day
+        #[arg(long)]
+        daily: bool,
     },
     /// Clear all entries from the database
     Clear,
@@ -262,13 +266,187 @@ fn cmd_clear(db: &Database) {
     }
 }
 
-fn cmd_log(db: &Database, billable_only: bool) {
+struct EntryDisplayInfo {
+    day: chrono::NaiveDate,
+    time_range: String,
+    start: DateTime<Local>,
+    end: DateTime<Local>,
+    duration_seconds: i64,
+    is_active: bool,
+}
+
+fn entry_display_info(
+    entry: &tm::db::TimeEntryDetail,
+    billable_only: bool,
+    now_local: DateTime<Local>,
+) -> EntryDisplayInfo {
+    let (start, end, duration_seconds, is_active) = if billable_only {
+        let start = entry
+            .billable_started_at
+            .unwrap_or(entry.started_at)
+            .with_timezone(&Local);
+        let stopped_at = entry.billable_stopped_at.or(entry.stopped_at);
+        let end = stopped_at.map(|dt| dt.with_timezone(&Local)).unwrap_or(now_local);
+        let duration_seconds = entry.billable_seconds.unwrap_or(entry.duration_seconds);
+        (start, end, duration_seconds, stopped_at.is_none())
+    } else {
+        let start = entry.started_at.with_timezone(&Local);
+        let end = entry.stopped_at.map(|dt| dt.with_timezone(&Local)).unwrap_or(now_local);
+        (start, end, entry.duration_seconds, entry.stopped_at.is_none())
+    };
+
+    EntryDisplayInfo {
+        day: start.date_naive(),
+        time_range: if is_active {
+            format!("{} to ...", start.format("%H:%M"))
+        } else {
+            format!("{} to {}", start.format("%H:%M"), end.format("%H:%M"))
+        },
+        start,
+        end,
+        duration_seconds,
+        is_active,
+    }
+}
+
+fn cmd_log_daily(projects: &[tm::db::ProjectSummary], billable_only: bool) {
+    struct DailyRange {
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+        label: String,
+    }
+
+    struct DailyTask {
+        project_name: String,
+        task_name: String,
+        total_seconds: i64,
+        ranges: Vec<DailyRange>,
+        has_active_range: bool,
+    }
+
+    let now_local = Local::now();
+    let mut days: BTreeMap<chrono::NaiveDate, Vec<DailyTask>> = BTreeMap::new();
+
+    for project in projects {
+        for task in &project.tasks {
+            for entry in &task.entries {
+                let info = entry_display_info(entry, billable_only, now_local);
+                let day_tasks = days.entry(info.day).or_default();
+
+                if let Some(existing) = day_tasks.iter_mut().find(|daily_task| {
+                    daily_task.project_name == project.project_name
+                        && daily_task.task_name == task.task_name
+                }) {
+                    existing.total_seconds += info.duration_seconds;
+                    existing.has_active_range |= info.is_active;
+                    existing.ranges.push(DailyRange {
+                        start: info.start,
+                        end: info.end,
+                        label: info.time_range,
+                    });
+                } else {
+                    day_tasks.push(DailyTask {
+                        project_name: project.project_name.clone(),
+                        task_name: task.task_name.clone(),
+                        total_seconds: info.duration_seconds,
+                        has_active_range: info.is_active,
+                        ranges: vec![DailyRange {
+                            start: info.start,
+                            end: info.end,
+                            label: info.time_range,
+                        }],
+                    });
+                }
+            }
+        }
+    }
+
+    if days.is_empty() {
+        println!("No projects found.");
+        return;
+    }
+
+    for (day, mut tasks) in days.into_iter().rev() {
+        let mut day_start: Option<DateTime<Local>> = None;
+        let mut day_end: Option<DateTime<Local>> = None;
+        let mut day_total_seconds = 0;
+
+        for task in &mut tasks {
+            task.ranges.sort_by_key(|range| range.start);
+            day_total_seconds += task.total_seconds;
+
+            if let Some(range) = task.ranges.first() {
+                day_start = Some(match day_start {
+                    Some(current) => current.min(range.start),
+                    None => range.start,
+                });
+            }
+
+            if let Some(range) = task.ranges.last() {
+                day_end = Some(match day_end {
+                    Some(current) => current.max(range.end),
+                    None => range.end,
+                });
+            }
+        }
+
+        tasks.sort_by(|a, b| {
+            a.ranges[0]
+                .start
+                .cmp(&b.ranges[0].start)
+                .then_with(|| a.project_name.cmp(&b.project_name))
+                .then_with(|| a.task_name.cmp(&b.task_name))
+        });
+
+        let day_start = day_start.unwrap_or(now_local);
+        let day_end = day_end.unwrap_or(now_local);
+
+        println!(
+            "{} {} (from {}{}, total time: {})",
+            "day:".blue().bold(),
+            day.format("%d %B %Y").to_string().cyan().bold(),
+            day_start.format("%H:%M").to_string().dimmed(),
+            if tasks.iter().any(|task| task.has_active_range) {
+                " and counting".dimmed().to_string()
+            } else {
+                format!(" to {}", day_end.format("%H:%M")).dimmed().to_string()
+            },
+            format_duration(day_total_seconds).yellow()
+        );
+
+        for task in tasks {
+            let ranges = task
+                .ranges
+                .into_iter()
+                .map(|range| range.label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  {} {} / {} ({}) {}",
+                "-".dimmed(),
+                task.project_name.cyan(),
+                task.task_name.green(),
+                format_duration(task.total_seconds).yellow(),
+                ranges.dimmed()
+            );
+        }
+    }
+}
+
+fn cmd_log(db: &Database, billable_only: bool, daily: bool) {
     match db.get_log() {
         Ok(projects) => {
             if projects.is_empty() {
                 println!("No projects found.");
                 return;
             }
+
+            if daily {
+                cmd_log_daily(&projects, billable_only);
+                return;
+            }
+
+            let now_local = Local::now();
 
             for project in projects {
                 let project_time_str = if billable_only {
@@ -314,34 +492,8 @@ fn cmd_log(db: &Database, billable_only: bool) {
                     let mut entries_data: Vec<(String, String, String, String)> = Vec::new();
 
                     for entry in &task.entries {
-                        let date_str = entry.date.format("%d %B %Y").to_string();
-
-                        let (start_time, end_time) = if billable_only {
-                            // Use billable times if available, otherwise fall back to real times
-                            let start = entry
-                                .billable_started_at
-                                .unwrap_or(entry.started_at)
-                                .with_timezone(&Local);
-                            let end = match entry.billable_stopped_at {
-                                Some(t) => t.with_timezone(&Local).format("%H:%M").to_string(),
-                                None => match entry.stopped_at {
-                                    Some(t) => t.with_timezone(&Local).format("%H:%M").to_string(),
-                                    None => "now".to_string(),
-                                },
-                            };
-                            (start.format("%H:%M").to_string(), end)
-                        } else {
-                            let start_local = entry.started_at.with_timezone(&Local);
-                            let end_time = match entry.stopped_at {
-                                Some(stopped) => {
-                                    stopped.with_timezone(&Local).format("%H:%M").to_string()
-                                }
-                                None => "now".to_string(),
-                            };
-                            (start_local.format("%H:%M").to_string(), end_time)
-                        };
-
-                        let time_range = format!("{} to {}", start_time, end_time);
+                        let info = entry_display_info(entry, billable_only, now_local);
+                        let date_str = info.day.format("%d %B %Y").to_string();
                         let duration = if billable_only {
                             format_duration(
                                 entry.billable_seconds.unwrap_or(entry.duration_seconds),
@@ -359,7 +511,7 @@ fn cmd_log(db: &Database, billable_only: bool) {
                             }
                         };
 
-                        entries_data.push((date_str, time_range, duration, entry.id.clone()));
+                        entries_data.push((date_str, info.time_range, duration, entry.id.clone()));
                     }
 
                     // Calculate max widths
@@ -410,7 +562,7 @@ fn main() {
         } => cmd_start(&db, &project, &task, round, started_at.as_deref()),
         Commands::Stop => cmd_stop(&db),
         Commands::Status => cmd_status(&db),
-        Commands::Log { billable } => cmd_log(&db, billable),
+        Commands::Log { billable, daily } => cmd_log(&db, billable, daily),
         Commands::Clear => cmd_clear(&db),
         Commands::Continue => cmd_continue(&db),
         Commands::Cancel => cmd_cancel(&db),
