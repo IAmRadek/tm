@@ -222,18 +222,28 @@ impl Database {
     }
 
     /// Start a new time entry
-    pub fn start_time_entry(&self, task_id: i64, round_on_stop: bool) -> Result<TimeEntry> {
+    pub fn start_time_entry(
+        &self,
+        task_id: i64,
+        round_on_stop: bool,
+        started_at: DateTime<Utc>,
+    ) -> Result<TimeEntry> {
         let id = Self::generate_hash_id();
 
         self.conn.execute(
-            "INSERT INTO time_entries (id, task_id, round_on_stop) VALUES (?1, ?2, ?3)",
-            params![id, task_id, round_on_stop],
+            "INSERT INTO time_entries (id, task_id, started_at, round_on_stop) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                id,
+                task_id,
+                started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                round_on_stop
+            ],
         )?;
 
         Ok(TimeEntry {
             id,
             task_id,
-            started_at: Utc::now(),
+            started_at,
             stopped_at: None,
         })
     }

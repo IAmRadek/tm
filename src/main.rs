@@ -1,4 +1,4 @@
-use chrono::{Local, Utc};
+use chrono::{DateTime, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::io::{self, Write};
@@ -34,6 +34,9 @@ enum Commands {
         /// Round start and end times to nearest 30 minutes when stopping
         #[arg(short, long)]
         round: bool,
+        /// Override the start timestamp. Accepts HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339
+        #[arg(long)]
+        started_at: Option<String>,
     },
     /// Stop the currently active time entry
     Stop,
@@ -77,7 +80,43 @@ fn format_duration(total_seconds: i64) -> String {
     parts.join(" ")
 }
 
-fn cmd_start(db: &Database, project: &str, task: &str, round: bool) {
+fn parse_started_at(input: &str) -> std::result::Result<DateTime<Utc>, String> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+        if let Ok(naive_dt) = NaiveDateTime::parse_from_str(input, format) {
+            return match Local.from_local_datetime(&naive_dt) {
+                LocalResult::Single(dt) => Ok(dt.with_timezone(&Utc)),
+                LocalResult::Ambiguous(dt, _) => Ok(dt.with_timezone(&Utc)),
+                LocalResult::None => Err(format!("Invalid local datetime: {}", input)),
+            };
+        }
+    }
+
+    for format in ["%H:%M:%S", "%H:%M"] {
+        if let Ok(time) = NaiveTime::parse_from_str(input, format) {
+            let today = Local::now().date_naive();
+            let naive_dt = today.and_time(time);
+            return match Local.from_local_datetime(&naive_dt) {
+                LocalResult::Single(dt) => Ok(dt.with_timezone(&Utc)),
+                LocalResult::Ambiguous(dt, _) => Ok(dt.with_timezone(&Utc)),
+                LocalResult::None => Err(format!("Invalid local time: {}", input)),
+            };
+        }
+    }
+
+    Err("Unsupported format. Use HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339.".to_string())
+}
+
+fn cmd_start(
+    db: &Database,
+    project: &str,
+    task: &str,
+    round: bool,
+    started_at: Option<&str>,
+) {
     match db.get_active_entry() {
         Ok(Some(entry)) => {
             return eprintln!(
@@ -99,7 +138,15 @@ fn cmd_start(db: &Database, project: &str, task: &str, round: bool) {
         Err(e) => return eprintln!("Error creating task: {}", e),
     };
 
-    if let Err(e) = db.start_time_entry(task_entry.id, round) {
+    let started_at = match started_at {
+        Some(value) => match parse_started_at(value) {
+            Ok(dt) => dt,
+            Err(e) => return eprintln!("Error parsing --started-at: {}", e),
+        },
+        None => Utc::now(),
+    };
+
+    if let Err(e) = db.start_time_entry(task_entry.id, round, started_at) {
         return eprintln!("Error starting time entry: {}", e);
     }
 
@@ -111,7 +158,7 @@ fn cmd_start(db: &Database, project: &str, task: &str, round: bool) {
     notify_daemon(&DaemonMessage::Started {
         project: project.to_string(),
         task: task.to_string(),
-        started_at: Utc::now(),
+        started_at,
     });
 }
 
@@ -179,7 +226,9 @@ fn cmd_continue(db: &Database) {
         Err(e) => return eprintln!("Error getting last task: {}", e),
     };
 
-    if let Err(e) = db.start_time_entry(task_id, false) {
+    let started_at = Utc::now();
+
+    if let Err(e) = db.start_time_entry(task_id, false, started_at) {
         return eprintln!("Error starting time entry: {}", e);
     }
 
@@ -187,7 +236,7 @@ fn cmd_continue(db: &Database) {
     notify_daemon(&DaemonMessage::Continued {
         project: project_name,
         task: task_name,
-        started_at: Utc::now(),
+        started_at,
     });
 }
 
@@ -357,7 +406,8 @@ fn main() {
             project,
             task,
             round,
-        } => cmd_start(&db, &project, &task, round),
+            started_at,
+        } => cmd_start(&db, &project, &task, round, started_at.as_deref()),
         Commands::Stop => cmd_stop(&db),
         Commands::Status => cmd_status(&db),
         Commands::Log { billable } => cmd_log(&db, billable),

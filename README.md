@@ -18,6 +18,12 @@ tm start myproject "implement feature"
 # Start with 30-min rounding (for billing)
 tm start myproject "implement feature" --round
 
+# Start at a specific time today
+tm start myproject "implement feature" --started-at 09:30
+
+# Start at a specific date and time
+tm start myproject "implement feature" --started-at "2026-04-07 09:30"
+
 # Check status
 tm status
 
