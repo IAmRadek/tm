@@ -220,7 +220,7 @@ fn cmd_continue(db: &Database) {
         Ok(None) => {}
     }
 
-    let (_, task_id, project_name, task_name) = match db.get_last_stopped_task() {
+    let (_, task_id, project_name, task_name, round_on_stop) = match db.get_last_stopped_task() {
         Ok(Some(entry)) => entry,
         Ok(None) => return eprintln!("No previous task to continue."),
         Err(e) => return eprintln!("Error getting last task: {}", e),
@@ -228,7 +228,7 @@ fn cmd_continue(db: &Database) {
 
     let started_at = Utc::now();
 
-    if let Err(e) = db.start_time_entry(task_id, false, started_at) {
+    if let Err(e) = db.start_time_entry(task_id, round_on_stop, started_at) {
         return eprintln!("Error starting time entry: {}", e);
     }
 

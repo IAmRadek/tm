@@ -539,11 +539,11 @@ impl Database {
         Ok(projects)
     }
 
-    /// Get the last stopped task (project_id, task_id, project_name, task_name)
-    pub fn get_last_stopped_task(&self) -> Result<Option<(i64, i64, String, String)>> {
-        let result: SqliteResult<(i64, i64, String, String)> = self.conn.query_row(
+    /// Get the last stopped task (project_id, task_id, project_name, task_name, round_on_stop)
+    pub fn get_last_stopped_task(&self) -> Result<Option<(i64, i64, String, String, bool)>> {
+        let result: SqliteResult<(i64, i64, String, String, bool)> = self.conn.query_row(
             "
-            SELECT t.project_id, t.id, p.name, t.name
+            SELECT t.project_id, t.id, p.name, t.name, te.round_on_stop
             FROM time_entries te
             JOIN tasks t ON te.task_id = t.id
             JOIN projects p ON t.project_id = p.id
@@ -552,7 +552,15 @@ impl Database {
             LIMIT 1
             ",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get::<_, i64>(4)? != 0,
+                ))
+            },
         );
 
         match result {
