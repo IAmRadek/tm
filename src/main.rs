@@ -69,7 +69,14 @@ enum Commands {
     Continue,
     /// Merge today's fragmented entries per task
     #[command(alias = "compact")]
-    Squash,
+    Squash {
+        /// Day to squash in YYYY-MM-DD format
+        #[arg(long, conflicts_with = "yesterday")]
+        day: Option<String>,
+        /// Squash entries for yesterday
+        #[arg(long)]
+        yesterday: bool,
+    },
     /// Cancel the current entry without saving
     Cancel,
 }
@@ -283,15 +290,36 @@ fn cmd_continue(db: &Database) {
     });
 }
 
-fn cmd_squash(db: &Database) {
-    match db.squash_today() {
+fn parse_day(input: &str) -> std::result::Result<chrono::NaiveDate, String> {
+    chrono::NaiveDate::parse_from_str(input, "%Y-%m-%d")
+        .map_err(|_| "Unsupported date format. Use YYYY-MM-DD.".to_string())
+}
+
+fn cmd_squash(db: &Database, day: Option<&str>, yesterday: bool) {
+    let day = if yesterday {
+        Local::now().date_naive() - chrono::Duration::days(1)
+    } else if let Some(day) = day {
+        match parse_day(day) {
+            Ok(day) => day,
+            Err(e) => return eprintln!("Error parsing --day: {}", e),
+        }
+    } else {
+        Local::now().date_naive()
+    };
+
+    match db.squash_day(day) {
         Ok(result) => {
             if result.squashed_tasks == 0 {
-                println!("No fragmented entries found for today.");
+                println!(
+                    "No fragmented entries found for {}.",
+                    day.format("%Y-%m-%d")
+                );
             } else {
                 println!(
-                    "Squashed {} task(s) for today, removed {} entries.",
-                    result.squashed_tasks, result.deleted_entries
+                    "Squashed {} task(s) for {}, removed {} entries.",
+                    result.squashed_tasks,
+                    day.format("%Y-%m-%d"),
+                    result.deleted_entries
                 );
             }
         }
@@ -637,7 +665,7 @@ fn main() {
         Commands::Log { billable, daily } => cmd_log(&db, billable, daily),
         Commands::Clear => cmd_clear(&db),
         Commands::Continue => cmd_continue(&db),
-        Commands::Squash => cmd_squash(&db),
+        Commands::Squash { day, yesterday } => cmd_squash(&db, day.as_deref(), yesterday),
         Commands::Cancel => cmd_cancel(&db),
     }
 }

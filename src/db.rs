@@ -651,7 +651,7 @@ impl Database {
         Ok(projects)
     }
 
-    pub fn squash_today(&self) -> Result<SquashResult> {
+    pub fn squash_day(&self, day: chrono::NaiveDate) -> Result<SquashResult> {
         #[derive(Clone)]
         struct SquashCandidate {
             id: String,
@@ -663,10 +663,8 @@ impl Database {
             round_on_stop: bool,
         }
 
-        let today = Local::now().date_naive();
         let day_start = Self::local_datetime_to_utc(
-            today
-                .and_hms_opt(0, 0, 0)
+            day.and_hms_opt(0, 0, 0)
                 .expect("midnight should always be valid"),
         )?;
         let day_end = day_start + Duration::days(1);

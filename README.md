@@ -41,6 +41,12 @@ tm continue
 # Merge today's fragmented entries per task
 tm squash
 
+# Merge yesterday's fragmented entries
+tm squash --yesterday
+
+# Merge fragmented entries for a specific day
+tm squash --day 2026-04-07
+
 # View log
 tm log
 
