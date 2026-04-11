@@ -33,6 +33,9 @@ tm stop
 # Continue last task
 tm continue
 
+# Merge today's fragmented entries per task
+tm squash
+
 # View log
 tm log
 
@@ -53,6 +56,7 @@ tm clear
 
 - Data stored in `~/.config/tm/data.sqlite`
 - Time entries grouped by project and task
+- `tm squash` merges today's stopped fragments per task into one wider entry
 - Optional rounding to nearest 30 minutes for billing
 - Tracks both actual and billable time
 

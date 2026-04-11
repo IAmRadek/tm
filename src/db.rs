@@ -1,4 +1,4 @@
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Duration, Local, LocalResult, TimeZone, Timelike, Utc};
 use rand::Rng;
 use rusqlite::{Connection, Result as SqliteResult, params};
 use std::env;
@@ -80,11 +80,37 @@ pub struct ProjectSummary {
     pub tasks: Vec<TaskSummary>,
 }
 
+pub struct SquashResult {
+    pub squashed_tasks: usize,
+    pub deleted_entries: usize,
+}
+
 pub struct Database {
     conn: Connection,
 }
 
 impl Database {
+    fn parse_datetime(input: &str) -> DateTime<Utc> {
+        input
+            .parse()
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(input, "%Y-%m-%d %H:%M:%S")
+                    .map(|dt| dt.and_utc())
+            })
+            .unwrap_or_else(|_| Utc::now())
+    }
+
+    fn local_datetime_to_utc(local: chrono::NaiveDateTime) -> Result<DateTime<Utc>> {
+        match Local.from_local_datetime(&local) {
+            LocalResult::Single(dt) => Ok(dt.with_timezone(&Utc)),
+            LocalResult::Ambiguous(dt, _) => Ok(dt.with_timezone(&Utc)),
+            LocalResult::None => Err(DbError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid local datetime",
+            ))),
+        }
+    }
+
     pub fn open() -> Result<Self> {
         let db_path = Self::get_db_path()?;
 
@@ -537,6 +563,134 @@ impl Database {
         }
 
         Ok(projects)
+    }
+
+    pub fn squash_today(&self) -> Result<SquashResult> {
+        #[derive(Clone)]
+        struct SquashCandidate {
+            id: String,
+            task_id: i64,
+            started_at: DateTime<Utc>,
+            stopped_at: DateTime<Utc>,
+            billable_started_at: Option<DateTime<Utc>>,
+            billable_stopped_at: Option<DateTime<Utc>>,
+            round_on_stop: bool,
+        }
+
+        let today = Local::now().date_naive();
+        let day_start = Self::local_datetime_to_utc(
+            today
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight should always be valid"),
+        )?;
+        let day_end = day_start + Duration::days(1);
+
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT id, task_id, started_at, stopped_at, billable_started_at, billable_stopped_at, round_on_stop
+            FROM time_entries
+            WHERE stopped_at IS NOT NULL
+              AND started_at >= ?1
+              AND started_at < ?2
+            ORDER BY task_id, started_at, stopped_at, id
+            ",
+        )?;
+
+        let rows = stmt.query_map(
+            params![
+                day_start.format("%Y-%m-%d %H:%M:%S").to_string(),
+                day_end.format("%Y-%m-%d %H:%M:%S").to_string()
+            ],
+            |row| {
+                Ok(SquashCandidate {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    started_at: Self::parse_datetime(&row.get::<_, String>(2)?),
+                    stopped_at: Self::parse_datetime(&row.get::<_, String>(3)?),
+                    billable_started_at: row
+                        .get::<_, Option<String>>(4)?
+                        .as_deref()
+                        .map(Self::parse_datetime),
+                    billable_stopped_at: row
+                        .get::<_, Option<String>>(5)?
+                        .as_deref()
+                        .map(Self::parse_datetime),
+                    round_on_stop: row.get::<_, i64>(6)? != 0,
+                })
+            },
+        )?;
+
+        let mut groups: Vec<Vec<SquashCandidate>> = Vec::new();
+        let mut current_group: Vec<SquashCandidate> = Vec::new();
+        let mut current_task_id: Option<i64> = None;
+
+        for row in rows {
+            let candidate = row?;
+            if current_task_id != Some(candidate.task_id) {
+                if !current_group.is_empty() {
+                    groups.push(current_group);
+                    current_group = Vec::new();
+                }
+                current_task_id = Some(candidate.task_id);
+            }
+            current_group.push(candidate);
+        }
+
+        if !current_group.is_empty() {
+            groups.push(current_group);
+        }
+
+        let mut squashed_tasks = 0;
+        let mut deleted_entries = 0;
+
+        for group in groups {
+            if group.len() < 2 {
+                continue;
+            }
+
+            let first = &group[0];
+            let last = group.last().expect("group is not empty");
+            let billable_started_at = group.iter().filter_map(|entry| entry.billable_started_at).min();
+            let billable_stopped_at = group.iter().filter_map(|entry| entry.billable_stopped_at).max();
+            let (billable_started_at, billable_stopped_at) =
+                match (billable_started_at, billable_stopped_at) {
+                    (Some(start), Some(stop)) => (Some(start), Some(stop)),
+                    _ => (None, None),
+                };
+
+            self.conn.execute(
+                "
+                UPDATE time_entries
+                SET started_at = ?1,
+                    stopped_at = ?2,
+                    billable_started_at = ?3,
+                    billable_stopped_at = ?4,
+                    round_on_stop = ?5
+                WHERE id = ?6
+                ",
+                params![
+                    first.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    last.stopped_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    billable_started_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    billable_stopped_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    last.round_on_stop,
+                    first.id
+                ],
+            )?;
+
+            for duplicate in group.iter().skip(1) {
+                self.conn
+                    .execute("DELETE FROM time_entries WHERE id = ?1", params![duplicate.id])?;
+                deleted_entries += 1;
+            }
+
+            squashed_tasks += 1;
+        }
+
+        Ok(SquashResult {
+            squashed_tasks,
+            deleted_entries,
+        })
     }
 
     /// Get the last stopped task (project_id, task_id, project_name, task_name, round_on_stop)

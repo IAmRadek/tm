@@ -56,6 +56,9 @@ enum Commands {
     Clear,
     /// Continue tracking the last stopped task
     Continue,
+    /// Merge today's fragmented entries per task
+    #[command(alias = "compact")]
+    Squash,
     /// Cancel the current entry without saving
     Cancel,
 }
@@ -242,6 +245,22 @@ fn cmd_continue(db: &Database) {
         task: task_name,
         started_at,
     });
+}
+
+fn cmd_squash(db: &Database) {
+    match db.squash_today() {
+        Ok(result) => {
+            if result.squashed_tasks == 0 {
+                println!("No fragmented entries found for today.");
+            } else {
+                println!(
+                    "Squashed {} task(s) for today, removed {} entries.",
+                    result.squashed_tasks, result.deleted_entries
+                );
+            }
+        }
+        Err(e) => eprintln!("Error squashing entries: {}", e),
+    }
 }
 
 fn cmd_clear(db: &Database) {
@@ -565,6 +584,7 @@ fn main() {
         Commands::Log { billable, daily } => cmd_log(&db, billable, daily),
         Commands::Clear => cmd_clear(&db),
         Commands::Continue => cmd_continue(&db),
+        Commands::Squash => cmd_squash(&db),
         Commands::Cancel => cmd_cancel(&db),
     }
 }
