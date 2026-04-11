@@ -4,7 +4,7 @@ use colored::Colorize;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use tm::db::{Database, DbError};
-use tm::ipc::{notify_daemon, DaemonMessage};
+use tm::ipc::{DaemonMessage, notify_daemon};
 
 #[derive(Parser)]
 #[command(name = "tm")]
@@ -38,6 +38,17 @@ enum Commands {
         /// Override the start timestamp. Accepts HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339
         #[arg(long)]
         started_at: Option<String>,
+    },
+    /// Amend an existing time entry by ID
+    Amend {
+        /// Time entry ID from `tm log`
+        id: String,
+        /// Override the start timestamp. Accepts HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339
+        #[arg(long)]
+        started_at: Option<String>,
+        /// Override the stop timestamp. Accepts HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339
+        #[arg(long)]
+        stopped_at: Option<String>,
     },
     /// Stop the currently active time entry
     Stop,
@@ -87,7 +98,7 @@ fn format_duration(total_seconds: i64) -> String {
     parts.join(" ")
 }
 
-fn parse_started_at(input: &str) -> std::result::Result<DateTime<Utc>, String> {
+fn parse_timestamp(input: &str) -> std::result::Result<DateTime<Utc>, String> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
         return Ok(dt.with_timezone(&Utc));
     }
@@ -117,13 +128,7 @@ fn parse_started_at(input: &str) -> std::result::Result<DateTime<Utc>, String> {
     Err("Unsupported format. Use HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339.".to_string())
 }
 
-fn cmd_start(
-    db: &Database,
-    project: &str,
-    task: &str,
-    round: bool,
-    started_at: Option<&str>,
-) {
+fn cmd_start(db: &Database, project: &str, task: &str, round: bool, started_at: Option<&str>) {
     match db.get_active_entry() {
         Ok(Some(entry)) => {
             return eprintln!(
@@ -146,7 +151,7 @@ fn cmd_start(
     };
 
     let started_at = match started_at {
-        Some(value) => match parse_started_at(value) {
+        Some(value) => match parse_timestamp(value) {
             Ok(dt) => dt,
             Err(e) => return eprintln!("Error parsing --started-at: {}", e),
         },
@@ -167,6 +172,37 @@ fn cmd_start(
         task: task.to_string(),
         started_at,
     });
+}
+
+fn cmd_amend(db: &Database, id: &str, started_at: Option<&str>, stopped_at: Option<&str>) {
+    if started_at.is_none() && stopped_at.is_none() {
+        return eprintln!("Nothing to amend. Provide --started-at and/or --stopped-at.");
+    }
+
+    let started_at = match started_at {
+        Some(value) => match parse_timestamp(value) {
+            Ok(dt) => Some(dt),
+            Err(e) => return eprintln!("Error parsing --started-at: {}", e),
+        },
+        None => None,
+    };
+
+    let stopped_at = match stopped_at {
+        Some(value) => match parse_timestamp(value) {
+            Ok(dt) => Some(dt),
+            Err(e) => return eprintln!("Error parsing --stopped-at: {}", e),
+        },
+        None => None,
+    };
+
+    match db.amend_time_entry(id, started_at, stopped_at) {
+        Ok(_) => println!("Amended entry {}.", id),
+        Err(DbError::EntryNotFound) => eprintln!("Time entry {} not found.", id),
+        Err(DbError::InvalidTimeRange) => {
+            eprintln!("Invalid time range: --stopped-at must be after --started-at.")
+        }
+        Err(e) => eprintln!("Error amending time entry: {}", e),
+    }
 }
 
 fn cmd_stop(db: &Database) {
@@ -305,13 +341,23 @@ fn entry_display_info(
             .unwrap_or(entry.started_at)
             .with_timezone(&Local);
         let stopped_at = entry.billable_stopped_at.or(entry.stopped_at);
-        let end = stopped_at.map(|dt| dt.with_timezone(&Local)).unwrap_or(now_local);
+        let end = stopped_at
+            .map(|dt| dt.with_timezone(&Local))
+            .unwrap_or(now_local);
         let duration_seconds = entry.billable_seconds.unwrap_or(entry.duration_seconds);
         (start, end, duration_seconds, stopped_at.is_none())
     } else {
         let start = entry.started_at.with_timezone(&Local);
-        let end = entry.stopped_at.map(|dt| dt.with_timezone(&Local)).unwrap_or(now_local);
-        (start, end, entry.duration_seconds, entry.stopped_at.is_none())
+        let end = entry
+            .stopped_at
+            .map(|dt| dt.with_timezone(&Local))
+            .unwrap_or(now_local);
+        (
+            start,
+            end,
+            entry.duration_seconds,
+            entry.stopped_at.is_none(),
+        )
     };
 
     EntryDisplayInfo {
@@ -428,7 +474,9 @@ fn cmd_log_daily(projects: &[tm::db::ProjectSummary], billable_only: bool) {
             if tasks.iter().any(|task| task.has_active_range) {
                 " and counting".dimmed().to_string()
             } else {
-                format!(" to {}", day_end.format("%H:%M")).dimmed().to_string()
+                format!(" to {}", day_end.format("%H:%M"))
+                    .dimmed()
+                    .to_string()
             },
             format_duration(day_total_seconds).yellow()
         );
@@ -579,6 +627,11 @@ fn main() {
             round,
             started_at,
         } => cmd_start(&db, &project, &task, round, started_at.as_deref()),
+        Commands::Amend {
+            id,
+            started_at,
+            stopped_at,
+        } => cmd_amend(&db, &id, started_at.as_deref(), stopped_at.as_deref()),
         Commands::Stop => cmd_stop(&db),
         Commands::Status => cmd_status(&db),
         Commands::Log { billable, daily } => cmd_log(&db, billable, daily),

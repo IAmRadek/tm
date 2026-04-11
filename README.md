@@ -24,6 +24,11 @@ tm start myproject "implement feature" --started-at 09:30
 # Start at a specific date and time
 tm start myproject "implement feature" --started-at "2026-04-07 09:30"
 
+# Amend an existing entry by ID
+tm amend <id> --started-at "2026-04-07 09:30"
+tm amend <id> --stopped-at "2026-04-07 11:00"
+tm amend <id> --started-at "2026-04-07 09:30" --stopped-at "2026-04-07 11:00"
+
 # Check status
 tm status
 

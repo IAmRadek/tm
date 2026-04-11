@@ -16,6 +16,10 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("No active time entry")]
     NoActiveEntry,
+    #[error("Time entry not found")]
+    EntryNotFound,
+    #[error("Stopped time must be after started time")]
+    InvalidTimeRange,
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -309,6 +313,88 @@ impl Database {
                 .and_then(|t| t.with_second(0))
                 .unwrap_or(dt)
         }
+    }
+
+    pub fn amend_time_entry(
+        &self,
+        entry_id: &str,
+        started_at: Option<DateTime<Utc>>,
+        stopped_at: Option<DateTime<Utc>>,
+    ) -> Result<TimeEntry> {
+        let (task_id, current_started_at, current_stopped_at, round_on_stop): (
+            i64,
+            String,
+            Option<String>,
+            bool,
+        ) = self
+            .conn
+            .query_row(
+                "
+                SELECT task_id, started_at, stopped_at, round_on_stop
+                FROM time_entries
+                WHERE id = ?1
+                ",
+                params![entry_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, i64>(3)? != 0,
+                    ))
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DbError::EntryNotFound,
+                _ => DbError::Sqlite(e),
+            })?;
+
+        let started_at = started_at.unwrap_or_else(|| Self::parse_datetime(&current_started_at));
+        let stopped_at =
+            stopped_at.or_else(|| current_stopped_at.as_deref().map(Self::parse_datetime));
+
+        if let Some(stopped_at) = stopped_at
+            && stopped_at < started_at
+        {
+            return Err(DbError::InvalidTimeRange);
+        }
+
+        let (billable_started_at, billable_stopped_at) = if round_on_stop {
+            match stopped_at {
+                Some(stopped_at) => (
+                    Some(Self::round_down_to_30min(started_at)),
+                    Some(Self::round_up_to_30min(stopped_at)),
+                ),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+        self.conn.execute(
+            "
+            UPDATE time_entries
+            SET started_at = ?1,
+                stopped_at = ?2,
+                billable_started_at = ?3,
+                billable_stopped_at = ?4
+            WHERE id = ?5
+            ",
+            params![
+                started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                stopped_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                billable_started_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                billable_stopped_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                entry_id,
+            ],
+        )?;
+
+        Ok(TimeEntry {
+            id: entry_id.to_string(),
+            task_id,
+            started_at,
+            stopped_at,
+        })
     }
 
     /// Stop the currently active time entry, returns (rounded, Option<(billable_start, billable_end)>)
@@ -650,8 +736,14 @@ impl Database {
 
             let first = &group[0];
             let last = group.last().expect("group is not empty");
-            let billable_started_at = group.iter().filter_map(|entry| entry.billable_started_at).min();
-            let billable_stopped_at = group.iter().filter_map(|entry| entry.billable_stopped_at).max();
+            let billable_started_at = group
+                .iter()
+                .filter_map(|entry| entry.billable_started_at)
+                .min();
+            let billable_stopped_at = group
+                .iter()
+                .filter_map(|entry| entry.billable_stopped_at)
+                .max();
             let (billable_started_at, billable_stopped_at) =
                 match (billable_started_at, billable_stopped_at) {
                     (Some(start), Some(stop)) => (Some(start), Some(stop)),
@@ -679,8 +771,10 @@ impl Database {
             )?;
 
             for duplicate in group.iter().skip(1) {
-                self.conn
-                    .execute("DELETE FROM time_entries WHERE id = ?1", params![duplicate.id])?;
+                self.conn.execute(
+                    "DELETE FROM time_entries WHERE id = ?1",
+                    params![duplicate.id],
+                )?;
                 deleted_entries += 1;
             }
 

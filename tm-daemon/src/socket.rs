@@ -1,8 +1,8 @@
 use std::sync::Arc;
+use tm::ipc::{DaemonMessage, socket_path};
 use tokio::io::AsyncBufReadExt;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
-use tm::ipc::{socket_path, DaemonMessage};
 
 use crate::state::TrackingState;
 
@@ -15,7 +15,11 @@ pub async fn run(state: Arc<Mutex<TrackingState>>) {
     let listener = match UnixListener::bind(&path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("tm-daemon: failed to bind socket at {}: {}", path.display(), e);
+            eprintln!(
+                "tm-daemon: failed to bind socket at {}: {}",
+                path.display(),
+                e
+            );
             return;
         }
     };
