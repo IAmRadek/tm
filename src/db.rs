@@ -816,6 +816,26 @@ impl Database {
         }
     }
 
+    pub fn get_last_stopped_at(&self) -> Result<Option<DateTime<Utc>>> {
+        let result: SqliteResult<String> = self.conn.query_row(
+            "
+            SELECT te.stopped_at
+            FROM time_entries te
+            WHERE te.stopped_at IS NOT NULL
+            ORDER BY te.stopped_at DESC
+            LIMIT 1
+            ",
+            [],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(stopped_at) => Ok(Some(Self::parse_datetime(&stopped_at))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Clear all data from the database
     pub fn clear_all(&self) -> Result<()> {
         self.conn.execute_batch(

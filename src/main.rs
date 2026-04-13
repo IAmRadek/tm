@@ -36,8 +36,11 @@ enum Commands {
         #[arg(short, long)]
         round: bool,
         /// Override the start timestamp. Accepts HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339
-        #[arg(long)]
+        #[arg(long, conflicts_with = "from_last_stop")]
         started_at: Option<String>,
+        /// Start from the stop time of the most recently finished entry
+        #[arg(long)]
+        from_last_stop: bool,
     },
     /// Amend an existing time entry by ID
     Amend {
@@ -135,7 +138,14 @@ fn parse_timestamp(input: &str) -> std::result::Result<DateTime<Utc>, String> {
     Err("Unsupported format. Use HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339.".to_string())
 }
 
-fn cmd_start(db: &Database, project: &str, task: &str, round: bool, started_at: Option<&str>) {
+fn cmd_start(
+    db: &Database,
+    project: &str,
+    task: &str,
+    round: bool,
+    started_at: Option<&str>,
+    from_last_stop: bool,
+) {
     match db.get_active_entry() {
         Ok(Some(entry)) => {
             return eprintln!(
@@ -157,12 +167,21 @@ fn cmd_start(db: &Database, project: &str, task: &str, round: bool, started_at: 
         Err(e) => return eprintln!("Error creating task: {}", e),
     };
 
-    let started_at = match started_at {
-        Some(value) => match parse_timestamp(value) {
+    let started_at = if let Some(value) = started_at {
+        match parse_timestamp(value) {
             Ok(dt) => dt,
             Err(e) => return eprintln!("Error parsing --started-at: {}", e),
-        },
-        None => Utc::now(),
+        }
+    } else if from_last_stop {
+        match db.get_last_stopped_at() {
+            Ok(Some(dt)) => dt,
+            Ok(None) => {
+                return eprintln!("No previous stopped entry to infer the start time from.");
+            }
+            Err(e) => return eprintln!("Error getting last stopped entry: {}", e),
+        }
+    } else {
+        Utc::now()
     };
 
     if let Err(e) = db.start_time_entry(task_entry.id, round, started_at) {
@@ -654,7 +673,15 @@ fn main() {
             task,
             round,
             started_at,
-        } => cmd_start(&db, &project, &task, round, started_at.as_deref()),
+            from_last_stop,
+        } => cmd_start(
+            &db,
+            &project,
+            &task,
+            round,
+            started_at.as_deref(),
+            from_last_stop,
+        ),
         Commands::Amend {
             id,
             started_at,
