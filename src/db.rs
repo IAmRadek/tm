@@ -278,6 +278,58 @@ impl Database {
         })
     }
 
+    pub fn add_completed_time_entry(
+        &self,
+        task_id: i64,
+        round_on_stop: bool,
+        started_at: DateTime<Utc>,
+        stopped_at: DateTime<Utc>,
+    ) -> Result<TimeEntry> {
+        if stopped_at < started_at {
+            return Err(DbError::InvalidTimeRange);
+        }
+
+        let id = Self::generate_hash_id();
+        let (billable_started_at, billable_stopped_at) = if round_on_stop {
+            (
+                Some(Self::round_down_to_30min(started_at)),
+                Some(Self::round_up_to_30min(stopped_at)),
+            )
+        } else {
+            (None, None)
+        };
+
+        self.conn.execute(
+            "
+            INSERT INTO time_entries (
+                id,
+                task_id,
+                started_at,
+                stopped_at,
+                billable_started_at,
+                billable_stopped_at,
+                round_on_stop
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ",
+            params![
+                id,
+                task_id,
+                started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                stopped_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                billable_started_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                billable_stopped_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                round_on_stop
+            ],
+        )?;
+
+        Ok(TimeEntry {
+            id,
+            task_id,
+            started_at,
+            stopped_at: Some(stopped_at),
+        })
+    }
+
     /// Round a datetime DOWN to nearest 30 minutes (for start time)
     fn round_down_to_30min(dt: DateTime<Utc>) -> DateTime<Utc> {
         let minutes = dt.minute();
@@ -458,6 +510,25 @@ impl Database {
         }
 
         Ok(())
+    }
+
+    pub fn retract_time_entry(&self, entry_id: &str) -> Result<bool> {
+        let was_active: bool = self
+            .conn
+            .query_row(
+                "SELECT stopped_at IS NULL FROM time_entries WHERE id = ?1",
+                params![entry_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DbError::EntryNotFound,
+                _ => DbError::Sqlite(e),
+            })?;
+
+        self.conn
+            .execute("DELETE FROM time_entries WHERE id = ?1", params![entry_id])?;
+
+        Ok(was_active)
     }
 
     /// Get the currently active time entry with project and task names
