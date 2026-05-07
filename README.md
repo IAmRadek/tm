@@ -50,8 +50,11 @@ tm squash --yesterday
 # Merge fragmented entries for a specific day
 tm squash --day 2026-04-07
 
-# View log
+# View today's log
 tm log
+
+# View all tasks and entries
+tm log --tasks
 
 # View log grouped by day
 tm log --daily
