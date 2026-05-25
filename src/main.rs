@@ -71,6 +71,9 @@ enum Commands {
         /// Show entries grouped by month
         #[arg(long, conflicts_with = "tasks")]
         monthly: bool,
+        /// Show a month calendar with logged days marked
+        #[arg(long, conflicts_with_all = ["daily", "monthly", "tasks"])]
+        calendar: bool,
         /// Show all tasks and their entries
         #[arg(long)]
         tasks: bool,
@@ -802,6 +805,88 @@ fn cmd_log_monthly(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     }
 }
 
+fn cmd_log_calendar(projects: &[tm::db::ProjectSummary], billable_only: bool) {
+    let now_local = Local::now();
+    let today = now_local.date_naive();
+    let mut months: BTreeMap<(i32, u32), BTreeMap<chrono::NaiveDate, i64>> = BTreeMap::new();
+
+    for project in projects {
+        for task in &project.tasks {
+            for entry in &task.entries {
+                let info = entry_display_info(entry, billable_only, now_local);
+                if info.duration_seconds > 0 {
+                    let month = (info.day.year(), info.day.month());
+                    *months
+                        .entry(month)
+                        .or_default()
+                        .entry(info.day)
+                        .or_default() += info.duration_seconds;
+                }
+            }
+        }
+    }
+
+    if months.is_empty() {
+        println!("No projects found.");
+        return;
+    }
+
+    for ((year, month), days) in months.into_iter().rev() {
+        let first_day = chrono::NaiveDate::from_ymd_opt(year, month, 1).expect("valid month");
+        let next_month = if month == 12 {
+            chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1).expect("valid month")
+        } else {
+            chrono::NaiveDate::from_ymd_opt(year, month + 1, 1).expect("valid month")
+        };
+        let last_day = next_month - chrono::Duration::days(1);
+        let total_seconds: i64 = days.values().sum();
+
+        println!("{}", first_day.format("%B %Y").to_string().cyan().bold());
+        println!(" Mon  Tue  Wed  Thu  Fri  Sat  Sun   Total");
+
+        let leading_empty_days = first_day.weekday().num_days_from_monday();
+        let mut day = first_day - chrono::Duration::days(leading_empty_days.into());
+
+        while day <= last_day {
+            let mut week_total_seconds = 0;
+
+            for _ in 0..7 {
+                if day < first_day || day > last_day {
+                    print!("     ");
+                } else if days.contains_key(&day) {
+                    let cell = format!("[{:02}]", day.day());
+                    if day == today {
+                        print!("{:>5}", cell.cyan().bold());
+                    } else {
+                        print!("{:>5}", cell.green().bold());
+                    }
+                } else {
+                    let cell = format!(" {:02} ", day.day());
+                    if day == today {
+                        print!("{:>5}", cell.cyan().bold());
+                    } else {
+                        print!("{:>5}", cell.dimmed());
+                    }
+                }
+                if day >= first_day && day <= last_day {
+                    week_total_seconds += days.get(&day).copied().unwrap_or(0);
+                }
+                day += chrono::Duration::days(1);
+            }
+            if week_total_seconds > 0 {
+                print!("   {}", format_duration(week_total_seconds).yellow());
+            }
+            println!();
+        }
+        println!(
+            "{:>35}   {}",
+            "---".dimmed(),
+            format_duration(total_seconds).yellow()
+        );
+        println!();
+    }
+}
+
 fn cmd_log_tasks(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     let now_local = Local::now();
 
@@ -889,7 +974,14 @@ fn cmd_log_tasks(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     }
 }
 
-fn cmd_log(db: &Database, billable_only: bool, daily: bool, monthly: bool, tasks: bool) {
+fn cmd_log(
+    db: &Database,
+    billable_only: bool,
+    daily: bool,
+    monthly: bool,
+    calendar: bool,
+    tasks: bool,
+) {
     match db.get_log() {
         Ok(projects) => {
             if daily {
@@ -909,6 +1001,11 @@ fn cmd_log(db: &Database, billable_only: bool, daily: bool, monthly: bool, tasks
                 }
 
                 cmd_log_monthly(&projects, billable_only);
+                return;
+            }
+
+            if calendar {
+                cmd_log_calendar(&projects, billable_only);
                 return;
             }
 
@@ -975,8 +1072,9 @@ fn main() {
             billable,
             daily,
             monthly,
+            calendar,
             tasks,
-        } => cmd_log(&db, billable, daily, monthly, tasks),
+        } => cmd_log(&db, billable, daily, monthly, calendar, tasks),
         Commands::Clear => cmd_clear(&db),
         Commands::Continue => cmd_continue(&db),
         Commands::Squash { day, yesterday } => cmd_squash(&db, day.as_deref(), yesterday),

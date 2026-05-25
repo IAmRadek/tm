@@ -59,6 +59,9 @@ tm log --tasks
 # View log grouped by day
 tm log --daily
 
+# View logged days in a month calendar
+tm log --calendar
+
 # View billable times only
 tm log --billable
 
