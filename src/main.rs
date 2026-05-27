@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
+use terminal_size::{Width, terminal_size};
 use tm::db::{Database, DbError};
 use tm::ipc::{DaemonMessage, notify_daemon};
 
@@ -74,6 +75,9 @@ enum Commands {
         /// Show a month calendar with logged days marked
         #[arg(long, conflicts_with_all = ["daily", "monthly", "tasks"])]
         calendar: bool,
+        /// Show a detailed month calendar with entries inside each day
+        #[arg(long, conflicts_with_all = ["daily", "monthly", "calendar", "tasks"])]
+        calendar_full: bool,
         /// Show all tasks and their entries
         #[arg(long)]
         tasks: bool,
@@ -887,6 +891,299 @@ fn cmd_log_calendar(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     }
 }
 
+struct CalendarFullEntry {
+    start: DateTime<Local>,
+    label: String,
+    duration_seconds: i64,
+    is_active: bool,
+}
+
+fn fit_cell(value: &str, width: usize) -> String {
+    let value_len = value.chars().count();
+    if value_len <= width {
+        return format!("{:<width$}", value, width = width);
+    }
+
+    if width <= 1 {
+        return "~".to_string();
+    }
+
+    let mut truncated: String = value.chars().take(width - 1).collect();
+    truncated.push('~');
+    truncated
+}
+
+fn print_calendar_full_border(cell_width: usize, total_width: usize) {
+    print!("{}", "+".dimmed());
+    for _ in 0..7 {
+        print!("{}", "-".repeat(cell_width).dimmed());
+        print!("{}", "+".dimmed());
+    }
+    print!("{}", "-".repeat(total_width).dimmed());
+    println!("{}", "+".dimmed());
+}
+
+#[derive(Clone, Copy)]
+enum CalendarFullCellStyle {
+    Plain,
+    Dimmed,
+    Header,
+    Day,
+    Entry,
+    Total,
+    More,
+}
+
+fn print_calendar_full_cell(value: &str, width: usize, style: CalendarFullCellStyle) {
+    let cell = fit_cell(value, width);
+    match style {
+        CalendarFullCellStyle::Plain => print!("{}", cell),
+        CalendarFullCellStyle::Dimmed => print!("{}", cell.dimmed()),
+        CalendarFullCellStyle::Header => print!("{}", cell.blue().bold()),
+        CalendarFullCellStyle::Day => {
+            if let Some((day, duration)) = cell.split_once(' ') {
+                print!("{} {}", day.cyan().bold(), duration.yellow());
+            } else {
+                print!("{}", cell.cyan().bold());
+            }
+        }
+        CalendarFullCellStyle::Entry => print!("{}", cell.green()),
+        CalendarFullCellStyle::Total => print!("{}", cell.yellow()),
+        CalendarFullCellStyle::More => print!("{}", cell.dimmed()),
+    }
+}
+
+fn print_calendar_full_row(
+    cells: &[(String, CalendarFullCellStyle)],
+    total: (&str, CalendarFullCellStyle),
+    cell_width: usize,
+    total_width: usize,
+) {
+    print!("{}", "|".dimmed());
+    for (cell, style) in cells {
+        print_calendar_full_cell(cell, cell_width, *style);
+        print!("{}", "|".dimmed());
+    }
+    print_calendar_full_cell(total.0, total_width, total.1);
+    println!("{}", "|".dimmed());
+}
+
+type CalendarFullLine = (String, CalendarFullCellStyle);
+
+struct CalendarFullLayout {
+    cell_width: usize,
+    total_width: usize,
+    cell_height: usize,
+    max_entries: usize,
+}
+
+fn calendar_full_layout() -> CalendarFullLayout {
+    let terminal_width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| terminal_size().map(|(Width(width), _)| usize::from(width)))
+        .unwrap_or(120);
+    let total_width = 12;
+    let separators_width = 9;
+    let available_cell_width = terminal_width.saturating_sub(total_width + separators_width) / 7;
+    let cell_width = available_cell_width.clamp(15, 32);
+    let max_entries = match cell_width {
+        0..=17 => 3,
+        18..=23 => 4,
+        24..=29 => 5,
+        _ => 6,
+    };
+
+    CalendarFullLayout {
+        cell_width,
+        total_width,
+        cell_height: max_entries + 2,
+        max_entries,
+    }
+}
+
+fn calendar_full_day_lines(
+    day: chrono::NaiveDate,
+    first_day: chrono::NaiveDate,
+    last_day: chrono::NaiveDate,
+    entries: &[CalendarFullEntry],
+    layout: &CalendarFullLayout,
+) -> Vec<CalendarFullLine> {
+    if day < first_day || day > last_day {
+        return vec![(String::new(), CalendarFullCellStyle::Dimmed); layout.cell_height];
+    }
+
+    let total_seconds: i64 = entries.iter().map(|entry| entry.duration_seconds).sum();
+    let mut lines = Vec::with_capacity(layout.cell_height);
+    let header = if total_seconds > 0 {
+        format!("{:02} {}", day.day(), format_duration(total_seconds))
+    } else {
+        format!("{:02}", day.day())
+    };
+    let day_style = if total_seconds > 0 {
+        CalendarFullCellStyle::Day
+    } else {
+        CalendarFullCellStyle::Dimmed
+    };
+    lines.push((fit_cell(&header, layout.cell_width), day_style));
+
+    for entry in entries.iter().take(layout.max_entries) {
+        let time = if entry.is_active {
+            format!("{}-...", entry.start.format("%H:%M"))
+        } else {
+            entry.start.format("%H:%M").to_string()
+        };
+        lines.push((
+            fit_cell(&format!("{} {}", time, entry.label), layout.cell_width),
+            CalendarFullCellStyle::Entry,
+        ));
+    }
+
+    if entries.len() > layout.max_entries {
+        lines.push((
+            fit_cell(
+                &format!("+{} more", entries.len() - layout.max_entries),
+                layout.cell_width,
+            ),
+            CalendarFullCellStyle::More,
+        ));
+    }
+
+    while lines.len() < layout.cell_height {
+        lines.push((String::new(), CalendarFullCellStyle::Plain));
+    }
+    lines.truncate(layout.cell_height);
+    lines
+}
+
+fn cmd_log_calendar_full(projects: &[tm::db::ProjectSummary], billable_only: bool) {
+    let now_local = Local::now();
+    let layout = calendar_full_layout();
+    let mut months: BTreeMap<(i32, u32), BTreeMap<chrono::NaiveDate, Vec<CalendarFullEntry>>> =
+        BTreeMap::new();
+
+    for project in projects {
+        for task in &project.tasks {
+            for entry in &task.entries {
+                let info = entry_display_info(entry, billable_only, now_local);
+                if info.duration_seconds > 0 {
+                    let month = (info.day.year(), info.day.month());
+                    months
+                        .entry(month)
+                        .or_default()
+                        .entry(info.day)
+                        .or_default()
+                        .push(CalendarFullEntry {
+                            start: info.start,
+                            label: format!("{}/{}", project.project_name, task.task_name),
+                            duration_seconds: info.duration_seconds,
+                            is_active: info.is_active,
+                        });
+                }
+            }
+        }
+    }
+
+    if months.is_empty() {
+        println!("No projects found.");
+        return;
+    }
+
+    for ((year, month), mut days) in months.into_iter().rev() {
+        for entries in days.values_mut() {
+            entries.sort_by_key(|entry| entry.start);
+        }
+
+        let first_day = chrono::NaiveDate::from_ymd_opt(year, month, 1).expect("valid month");
+        let next_month = if month == 12 {
+            chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1).expect("valid month")
+        } else {
+            chrono::NaiveDate::from_ymd_opt(year, month + 1, 1).expect("valid month")
+        };
+        let last_day = next_month - chrono::Duration::days(1);
+        let total_row_width = 7 * layout.cell_width + layout.total_width + 8;
+        let total_seconds: i64 = days
+            .values()
+            .flat_map(|entries| entries.iter())
+            .map(|entry| entry.duration_seconds)
+            .sum();
+
+        println!("{}", first_day.format("%B %Y").to_string().cyan().bold());
+        print_calendar_full_border(layout.cell_width, layout.total_width);
+        print_calendar_full_row(
+            &[
+                ("Mon".to_string(), CalendarFullCellStyle::Header),
+                ("Tue".to_string(), CalendarFullCellStyle::Header),
+                ("Wed".to_string(), CalendarFullCellStyle::Header),
+                ("Thu".to_string(), CalendarFullCellStyle::Header),
+                ("Fri".to_string(), CalendarFullCellStyle::Header),
+                ("Sat".to_string(), CalendarFullCellStyle::Header),
+                ("Sun".to_string(), CalendarFullCellStyle::Header),
+            ],
+            ("Total", CalendarFullCellStyle::Header),
+            layout.cell_width,
+            layout.total_width,
+        );
+        print_calendar_full_border(layout.cell_width, layout.total_width);
+
+        let leading_empty_days = first_day.weekday().num_days_from_monday();
+        let mut day = first_day - chrono::Duration::days(leading_empty_days.into());
+
+        while day <= last_day {
+            let mut week_days = Vec::with_capacity(7);
+            let mut week_total_seconds = 0;
+
+            for _ in 0..7 {
+                if day >= first_day && day <= last_day {
+                    let entries = days.get(&day).map(Vec::as_slice).unwrap_or(&[]);
+                    week_total_seconds += entries
+                        .iter()
+                        .map(|entry| entry.duration_seconds)
+                        .sum::<i64>();
+                    week_days.push(calendar_full_day_lines(
+                        day, first_day, last_day, entries, &layout,
+                    ));
+                } else {
+                    week_days.push(calendar_full_day_lines(
+                        day,
+                        first_day,
+                        last_day,
+                        &[],
+                        &layout,
+                    ));
+                }
+                day += chrono::Duration::days(1);
+            }
+
+            for line_idx in 0..layout.cell_height {
+                let cells = week_days
+                    .iter()
+                    .map(|lines| lines[line_idx].clone())
+                    .collect::<Vec<_>>();
+                let total = if line_idx == 0 && week_total_seconds > 0 {
+                    format_duration(week_total_seconds)
+                } else {
+                    String::new()
+                };
+                print_calendar_full_row(
+                    &cells,
+                    (&total, CalendarFullCellStyle::Total),
+                    layout.cell_width,
+                    layout.total_width,
+                );
+            }
+            print_calendar_full_border(layout.cell_width, layout.total_width);
+        }
+
+        println!(
+            "{:>width$}",
+            format!("--- {}", format_duration(total_seconds)).yellow(),
+            width = total_row_width
+        );
+        println!();
+    }
+}
+
 fn cmd_log_tasks(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     let now_local = Local::now();
 
@@ -980,6 +1277,7 @@ fn cmd_log(
     daily: bool,
     monthly: bool,
     calendar: bool,
+    calendar_full: bool,
     tasks: bool,
 ) {
     match db.get_log() {
@@ -1006,6 +1304,11 @@ fn cmd_log(
 
             if calendar {
                 cmd_log_calendar(&projects, billable_only);
+                return;
+            }
+
+            if calendar_full {
+                cmd_log_calendar_full(&projects, billable_only);
                 return;
             }
 
@@ -1073,8 +1376,17 @@ fn main() {
             daily,
             monthly,
             calendar,
+            calendar_full,
             tasks,
-        } => cmd_log(&db, billable, daily, monthly, calendar, tasks),
+        } => cmd_log(
+            &db,
+            billable,
+            daily,
+            monthly,
+            calendar,
+            calendar_full,
+            tasks,
+        ),
         Commands::Clear => cmd_clear(&db),
         Commands::Continue => cmd_continue(&db),
         Commands::Squash { day, yesterday } => cmd_squash(&db, day.as_deref(), yesterday),
