@@ -62,6 +62,7 @@ tm log --daily
 # View logged days in a month calendar
 tm log --calendar
 tm log --calendar-full
+tm log --calendar-full --all
 
 # View billable times only
 tm log --billable

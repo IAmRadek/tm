@@ -78,6 +78,9 @@ enum Commands {
         /// Show a detailed month calendar with entries inside each day
         #[arg(long, conflicts_with_all = ["daily", "monthly", "calendar", "tasks"])]
         calendar_full: bool,
+        /// Show all months with --calendar-full
+        #[arg(long, requires = "calendar_full")]
+        all: bool,
         /// Show all tasks and their entries
         #[arg(long)]
         tasks: bool,
@@ -1056,8 +1059,9 @@ fn calendar_full_day_lines(
     lines
 }
 
-fn cmd_log_calendar_full(projects: &[tm::db::ProjectSummary], billable_only: bool) {
+fn cmd_log_calendar_full(projects: &[tm::db::ProjectSummary], billable_only: bool, all: bool) {
     let now_local = Local::now();
+    let current_month = (now_local.year(), now_local.month());
     let layout = calendar_full_layout();
     let mut months: BTreeMap<(i32, u32), BTreeMap<chrono::NaiveDate, Vec<CalendarFullEntry>>> =
         BTreeMap::new();
@@ -1068,6 +1072,9 @@ fn cmd_log_calendar_full(projects: &[tm::db::ProjectSummary], billable_only: boo
                 let info = entry_display_info(entry, billable_only, now_local);
                 if info.duration_seconds > 0 {
                     let month = (info.day.year(), info.day.month());
+                    if !all && month != current_month {
+                        continue;
+                    }
                     months
                         .entry(month)
                         .or_default()
@@ -1278,6 +1285,7 @@ fn cmd_log(
     monthly: bool,
     calendar: bool,
     calendar_full: bool,
+    all: bool,
     tasks: bool,
 ) {
     match db.get_log() {
@@ -1308,7 +1316,7 @@ fn cmd_log(
             }
 
             if calendar_full {
-                cmd_log_calendar_full(&projects, billable_only);
+                cmd_log_calendar_full(&projects, billable_only, all);
                 return;
             }
 
@@ -1377,6 +1385,7 @@ fn main() {
             monthly,
             calendar,
             calendar_full,
+            all,
             tasks,
         } => cmd_log(
             &db,
@@ -1385,6 +1394,7 @@ fn main() {
             monthly,
             calendar,
             calendar_full,
+            all,
             tasks,
         ),
         Commands::Clear => cmd_clear(&db),
