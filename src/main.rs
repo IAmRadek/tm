@@ -1,5 +1,6 @@
 use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use colored::Colorize;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -110,6 +111,11 @@ enum Commands {
     Retract {
         /// Time entry ID from `tm log`
         id: String,
+    },
+    /// Print a shell completion script to stdout
+    Completions {
+        /// Shell to generate the script for
+        shell: Shell,
     },
 }
 
@@ -1335,6 +1341,11 @@ fn main() {
 
     setup_colors(cli.no_color);
 
+    if let Commands::Completions { shell } = cli.command {
+        clap_complete::generate(shell, &mut Cli::command(), "tm", &mut io::stdout());
+        return;
+    }
+
     let db = match Database::open() {
         Ok(db) => db,
         Err(e) => {
@@ -1388,5 +1399,6 @@ fn main() {
         Commands::Squash { day, yesterday } => cmd_squash(&db, day.as_deref(), yesterday),
         Commands::Cancel => cmd_cancel(&db),
         Commands::Retract { id } => cmd_retract(&db, &id),
+        Commands::Completions { .. } => unreachable!("handled before opening the database"),
     }
 }
