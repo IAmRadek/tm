@@ -1,56 +1,73 @@
 {
   description = "tm - minimal CLI time tracker";
 
-  outputs = { self }: {
-    overlays.default = final: prev: {
-      tm = final.rustPlatform.buildRustPackage {
-        pname = "tm";
-        version = "0.1.0";
-        src = self;
-        cargoLock.lockFile = ./Cargo.lock;
-        cargoBuildFlags = [ "--package" "tm" ];
-        doCheck = false;
-      };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
-      tm-daemon = final.rustPlatform.buildRustPackage {
-        pname = "tm-daemon";
-        version = "0.1.0";
-        src = self;
-        cargoLock.lockFile = ./Cargo.lock;
-        cargoBuildFlags = [ "--package" "tm-daemon" ];
-        buildInputs = with final.darwin.apple_sdk.frameworks; [
-          AppKit
-          Foundation
-        ];
-        doCheck = false;
-      };
-    };
-
-    darwinModules.default = { config, lib, pkgs, ... }:
+  outputs = { self, nixpkgs }:
     let
-      cfg = config.services.tm-daemon;
-    in {
-      options.services.tm-daemon = {
-        enable = lib.mkEnableOption "tm time tracker menu bar daemon";
-        package = lib.mkOption {
-          type = lib.types.package;
-          default = pkgs.tm-daemon;
-          defaultText = lib.literalExpression "pkgs.tm-daemon";
+      lib = nixpkgs.lib;
+      systems = [ "aarch64-darwin" "aarch64-linux" "x86_64-linux" ];
+      forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      version = (lib.importTOML ./Cargo.toml).package.version;
+
+      # Builds and tests one crate of the Cargo workspace.
+      mkPackage = pkgs: pname:
+        pkgs.rustPlatform.buildRustPackage {
+          inherit pname version;
+          src = self;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "--package" pname ];
+          cargoTestFlags = [ "--package" pname ];
         };
+    in {
+      packages = forAllSystems (pkgs:
+        let tm = mkPackage pkgs "tm";
+        in {
+          inherit tm;
+          default = tm;
+        } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+          tm-daemon = mkPackage pkgs "tm-daemon";
+        });
+
+      checks = forAllSystems (pkgs: self.packages.${pkgs.stdenv.hostPlatform.system});
+
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
+          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.tm ];
+          packages = [ pkgs.clippy pkgs.rustfmt pkgs.rust-analyzer ];
+        };
+      });
+
+      overlays.default = final: prev: {
+        tm = mkPackage final "tm";
+        tm-daemon = mkPackage final "tm-daemon";
       };
 
-      config = lib.mkIf cfg.enable {
-        launchd.user.agents.tm-daemon = {
-          serviceConfig = {
-            Label = "com.iamradek.tm-daemon";
-            ProgramArguments = [ "${cfg.package}/bin/tm-daemon" ];
-            RunAtLoad = true;
-            KeepAlive = true;
-            StandardOutPath = "/tmp/tm-daemon.log";
-            StandardErrorPath = "/tmp/tm-daemon.err";
+      darwinModules.default = { config, lib, pkgs, ... }:
+      let
+        cfg = config.services.tm-daemon;
+      in {
+        options.services.tm-daemon = {
+          enable = lib.mkEnableOption "tm time tracker menu bar daemon";
+          package = lib.mkOption {
+            type = lib.types.package;
+            default = self.packages.${pkgs.stdenv.hostPlatform.system}.tm-daemon;
+            defaultText = lib.literalExpression "tm.packages.\${system}.tm-daemon";
+          };
+        };
+
+        config = lib.mkIf cfg.enable {
+          launchd.user.agents.tm-daemon = {
+            serviceConfig = {
+              Label = "com.iamradek.tm-daemon";
+              ProgramArguments = [ "${cfg.package}/bin/tm-daemon" ];
+              RunAtLoad = true;
+              KeepAlive = true;
+              StandardOutPath = "/tmp/tm-daemon.log";
+              StandardErrorPath = "/tmp/tm-daemon.err";
+            };
           };
         };
       };
     };
-  };
 }
