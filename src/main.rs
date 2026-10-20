@@ -63,9 +63,12 @@ enum Commands {
     Status,
     /// Show all projects and tasks with logged time
     Log {
-        /// Show only billable times (for billing reports)
+        /// Show actual times instead of billable times
+        #[arg(long)]
+        actual: bool,
+        /// Show time ranges in today's log
         #[arg(short, long)]
-        billable: bool,
+        verbose: bool,
         /// Show entries grouped by day
         #[arg(long, conflicts_with_all = ["monthly", "tasks"])]
         daily: bool,
@@ -605,7 +608,7 @@ fn cmd_log_daily(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     }
 }
 
-fn cmd_log_today(projects: &[tm::db::ProjectSummary], billable_only: bool) {
+fn cmd_log_today(projects: &[tm::db::ProjectSummary], billable_only: bool, verbose: bool) {
     struct TodayRange {
         start: DateTime<Local>,
         end: DateTime<Local>,
@@ -702,13 +705,22 @@ fn cmd_log_today(projects: &[tm::db::ProjectSummary], billable_only: bool) {
         _ => "no entries".to_string(),
     };
 
-    println!(
-        "{} {} ({}, total time: {})",
-        "today:".blue().bold(),
-        format_log_date(today).cyan().bold(),
-        time_span.dimmed(),
-        format_duration(day_total_seconds).yellow()
-    );
+    if verbose {
+        println!(
+            "{} {} ({}, total time: {})",
+            "today:".blue().bold(),
+            format_log_date(today).cyan().bold(),
+            time_span.dimmed(),
+            format_duration(day_total_seconds).yellow()
+        );
+    } else {
+        println!(
+            "{} {} (total time: {})",
+            "today:".blue().bold(),
+            format_log_date(today).cyan().bold(),
+            format_duration(day_total_seconds).yellow()
+        );
+    }
 
     if tasks.is_empty() {
         println!("  {}", "No tasks.".dimmed());
@@ -716,6 +728,17 @@ fn cmd_log_today(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     }
 
     for task in tasks {
+        if !verbose {
+            println!(
+                "  {} {} / {} ({})",
+                "-".dimmed(),
+                task.project_name.cyan(),
+                task.task_name.green(),
+                format_duration(task.total_seconds).yellow()
+            );
+            continue;
+        }
+
         let ranges = task
             .ranges
             .into_iter()
@@ -1287,6 +1310,7 @@ fn cmd_log(
     calendar_full: bool,
     all: bool,
     tasks: bool,
+    verbose: bool,
 ) {
     match db.get_log() {
         Ok(projects) => {
@@ -1330,7 +1354,7 @@ fn cmd_log(
                 return;
             }
 
-            cmd_log_today(&projects, billable_only);
+            cmd_log_today(&projects, billable_only, verbose);
         }
         Err(e) => eprintln!("Error getting log: {}", e),
     }
@@ -1380,7 +1404,8 @@ fn main() {
         Commands::Stop => cmd_stop(&db),
         Commands::Status => cmd_status(&db),
         Commands::Log {
-            billable,
+            actual,
+            verbose,
             daily,
             monthly,
             calendar,
@@ -1389,13 +1414,14 @@ fn main() {
             tasks,
         } => cmd_log(
             &db,
-            billable,
+            !actual,
             daily,
             monthly,
             calendar,
             calendar_full,
             all,
             tasks,
+            verbose,
         ),
         Commands::Clear => cmd_clear(&db),
         Commands::Continue => cmd_continue(&db),

@@ -50,8 +50,11 @@ tm squash --yesterday
 # Merge fragmented entries for a specific day
 tm squash --day 2026-04-07
 
-# View today's log
+# View today's log (billable times)
 tm log
+
+# View today's log with time ranges
+tm log --verbose
 
 # View all tasks and entries
 tm log --tasks
@@ -64,8 +67,8 @@ tm log --calendar
 tm log --calendar-full
 tm log --calendar-full --all
 
-# View billable times only
-tm log --billable
+# View actual times
+tm log --actual
 
 # Cancel current entry
 tm cancel
@@ -80,7 +83,7 @@ tm clear
 - Time entries grouped by project and task
 - `tm squash` merges today's stopped fragments per task into one wider entry
 - Optional rounding to nearest 30 minutes for billing
-- Tracks both actual and billable time
+- Tracks both actual and billable time. `tm log` shows billable time by default
 
 ## License
 
