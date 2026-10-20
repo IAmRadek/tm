@@ -18,6 +18,13 @@
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "--package" pname ];
           cargoTestFlags = [ "--package" pname ];
+          nativeBuildInputs = [ pkgs.installShellFiles ];
+          postInstall = lib.optionalString (pname == "tm") ''
+            installShellCompletion --cmd tm \
+              --bash <($out/bin/tm completions bash) \
+              --fish <($out/bin/tm completions fish) \
+              --zsh <($out/bin/tm completions zsh)
+          '';
         };
     in {
       packages = forAllSystems (pkgs:
