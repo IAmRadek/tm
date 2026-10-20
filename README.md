@@ -15,9 +15,6 @@ cargo install --path .
 tm start <project> <task>
 tm start myproject "implement feature"
 
-# Start with 30-min rounding (for billing)
-tm start myproject "implement feature" --round
-
 # Start at a specific time today
 tm start myproject "implement feature" --at 09:30
 
@@ -53,7 +50,7 @@ tm squash --yesterday
 # Merge fragmented entries for a specific day
 tm squash --day 2026-04-07
 
-# View today's log (billable times)
+# View today's log
 tm log
 
 # View today's log with time ranges
@@ -70,9 +67,6 @@ tm log --calendar
 tm log --calendar-full
 tm log --calendar-full --all
 
-# View actual times
-tm log --actual
-
 # Cancel current entry
 tm cancel
 
@@ -85,8 +79,7 @@ tm clear
 - Data stored in `~/.config/tm/data.sqlite`
 - Time entries grouped by project and task
 - `tm squash` merges today's stopped fragments per task into one wider entry
-- Optional rounding to nearest 30 minutes for billing
-- Tracks both actual and billable time. `tm log` shows billable time by default
+- `--at` on `tm start` and `tm stop` sets the time you track
 
 ## License
 

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Local, LocalResult, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, Local, LocalResult, TimeZone, Utc};
 use rand::Rng;
 use rusqlite::{Connection, Result as SqliteResult, params};
 use std::env;
@@ -23,8 +23,6 @@ pub enum DbError {
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
-
-pub type BillableTimes = Option<(DateTime<Utc>, DateTime<Utc>)>;
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -63,16 +61,12 @@ pub struct TimeEntryDetail {
     pub started_at: DateTime<Utc>,
     pub stopped_at: Option<DateTime<Utc>>,
     pub duration_seconds: i64,
-    pub billable_seconds: Option<i64>,
-    pub billable_started_at: Option<DateTime<Utc>>,
-    pub billable_stopped_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TaskSummary {
     pub task_name: String,
     pub total_seconds: i64,
-    pub billable_seconds: i64,
     pub entries: Vec<TimeEntryDetail>,
 }
 
@@ -80,7 +74,6 @@ pub struct TaskSummary {
 pub struct ProjectSummary {
     pub project_name: String,
     pub total_seconds: i64,
-    pub billable_seconds: i64,
     pub tasks: Vec<TaskSummary>,
 }
 
@@ -157,9 +150,6 @@ impl Database {
                 task_id INTEGER NOT NULL,
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 stopped_at TEXT,
-                billable_started_at TEXT,
-                billable_stopped_at TEXT,
-                round_on_stop INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
             );
 
@@ -255,18 +245,16 @@ impl Database {
     pub fn start_time_entry(
         &self,
         task_id: i64,
-        round_on_stop: bool,
         started_at: DateTime<Utc>,
     ) -> Result<TimeEntry> {
         let id = Self::generate_hash_id();
 
         self.conn.execute(
-            "INSERT INTO time_entries (id, task_id, started_at, round_on_stop) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO time_entries (id, task_id, started_at) VALUES (?1, ?2, ?3)",
             params![
                 id,
                 task_id,
-                started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                round_on_stop
+                started_at.format("%Y-%m-%d %H:%M:%S").to_string()
             ],
         )?;
 
@@ -281,7 +269,6 @@ impl Database {
     pub fn add_completed_time_entry(
         &self,
         task_id: i64,
-        round_on_stop: bool,
         started_at: DateTime<Utc>,
         stopped_at: DateTime<Utc>,
     ) -> Result<TimeEntry> {
@@ -290,14 +277,6 @@ impl Database {
         }
 
         let id = Self::generate_hash_id();
-        let (billable_started_at, billable_stopped_at) = if round_on_stop {
-            (
-                Some(Self::round_down_to_30min(started_at)),
-                Some(Self::round_up_to_30min(stopped_at)),
-            )
-        } else {
-            (None, None)
-        };
 
         self.conn.execute(
             "
@@ -305,20 +284,14 @@ impl Database {
                 id,
                 task_id,
                 started_at,
-                stopped_at,
-                billable_started_at,
-                billable_stopped_at,
-                round_on_stop
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                stopped_at
+            ) VALUES (?1, ?2, ?3, ?4)
             ",
             params![
                 id,
                 task_id,
                 started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                stopped_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                billable_started_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-                billable_stopped_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-                round_on_stop
+                stopped_at.format("%Y-%m-%d %H:%M:%S").to_string()
             ],
         )?;
 
@@ -330,71 +303,22 @@ impl Database {
         })
     }
 
-    /// Round a datetime DOWN to nearest 30 minutes (for start time)
-    fn round_down_to_30min(dt: DateTime<Utc>) -> DateTime<Utc> {
-        let minutes = dt.minute();
-
-        // Round down: 0-29 → 0, 30-59 → 30
-        let rounded_mins = if minutes < 30 { 0 } else { 30 };
-
-        dt.with_minute(rounded_mins)
-            .and_then(|t| t.with_second(0))
-            .unwrap_or(dt)
-    }
-
-    /// Round a datetime UP to nearest 30 minutes (for end time)
-    fn round_up_to_30min(dt: DateTime<Utc>) -> DateTime<Utc> {
-        let minutes = dt.minute();
-        let seconds = dt.second();
-
-        // If exactly on 0 or 30, no rounding needed
-        if (minutes == 0 || minutes == 30) && seconds == 0 {
-            return dt;
-        }
-
-        // Round up: 1-30 → 30, 31-59 → 60 (next hour)
-        let rounded_mins = if minutes < 30 { 30 } else { 60 };
-
-        if rounded_mins == 60 {
-            dt.with_minute(0)
-                .and_then(|t| t.with_second(0))
-                .map(|t| t + chrono::Duration::hours(1))
-                .unwrap_or(dt)
-        } else {
-            dt.with_minute(rounded_mins)
-                .and_then(|t| t.with_second(0))
-                .unwrap_or(dt)
-        }
-    }
-
     pub fn amend_time_entry(
         &self,
         entry_id: &str,
         started_at: Option<DateTime<Utc>>,
         stopped_at: Option<DateTime<Utc>>,
     ) -> Result<TimeEntry> {
-        let (task_id, current_started_at, current_stopped_at, round_on_stop): (
-            i64,
-            String,
-            Option<String>,
-            bool,
-        ) = self
+        let (task_id, current_started_at, current_stopped_at): (i64, String, Option<String>) = self
             .conn
             .query_row(
                 "
-                SELECT task_id, started_at, stopped_at, round_on_stop
+                SELECT task_id, started_at, stopped_at
                 FROM time_entries
                 WHERE id = ?1
                 ",
                 params![entry_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get::<_, i64>(3)? != 0,
-                    ))
-                },
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => DbError::EntryNotFound,
@@ -411,32 +335,16 @@ impl Database {
             return Err(DbError::InvalidTimeRange);
         }
 
-        let (billable_started_at, billable_stopped_at) = if round_on_stop {
-            match stopped_at {
-                Some(stopped_at) => (
-                    Some(Self::round_down_to_30min(started_at)),
-                    Some(Self::round_up_to_30min(stopped_at)),
-                ),
-                None => (None, None),
-            }
-        } else {
-            (None, None)
-        };
-
         self.conn.execute(
             "
             UPDATE time_entries
             SET started_at = ?1,
-                stopped_at = ?2,
-                billable_started_at = ?3,
-                billable_stopped_at = ?4
-            WHERE id = ?5
+                stopped_at = ?2
+            WHERE id = ?3
             ",
             params![
                 started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                 stopped_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-                billable_started_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-                billable_stopped_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
                 entry_id,
             ],
         )?;
@@ -449,15 +357,14 @@ impl Database {
         })
     }
 
-    /// Stop the currently active time entry, returns (rounded, Option<(billable_start, billable_end)>)
-    pub fn stop_active_entry(&self, stopped_at: DateTime<Utc>) -> Result<(bool, BillableTimes)> {
-        // Check if there's an active entry and if it should be rounded
-        let (entry_id, started_at_str, round_on_stop): (String, String, bool) = self
+    /// Stop the currently active time entry
+    pub fn stop_active_entry(&self, stopped_at: DateTime<Utc>) -> Result<()> {
+        let (entry_id, started_at_str): (String, String) = self
             .conn
             .query_row(
-                "SELECT id, started_at, round_on_stop FROM time_entries WHERE stopped_at IS NULL LIMIT 1",
+                "SELECT id, started_at FROM time_entries WHERE stopped_at IS NULL LIMIT 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => DbError::NoActiveEntry,
@@ -476,29 +383,12 @@ impl Database {
             return Err(DbError::InvalidTimeRange);
         }
 
-        if round_on_stop {
-            let billable_start = Self::round_down_to_30min(started_at);
-            let billable_stop = Self::round_up_to_30min(stopped_at);
+        self.conn.execute(
+            "UPDATE time_entries SET stopped_at = ?1 WHERE id = ?2",
+            params![stopped_at.format("%Y-%m-%d %H:%M:%S").to_string(), entry_id],
+        )?;
 
-            self.conn.execute(
-                "UPDATE time_entries SET stopped_at = ?1, billable_started_at = ?2, billable_stopped_at = ?3 WHERE id = ?4",
-                params![
-                    stopped_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    billable_start.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    billable_stop.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    entry_id
-                ],
-            )?;
-
-            Ok((true, Some((billable_start, billable_stop))))
-        } else {
-            self.conn.execute(
-                "UPDATE time_entries SET stopped_at = ?1 WHERE id = ?2",
-                params![stopped_at.format("%Y-%m-%d %H:%M:%S").to_string(), entry_id],
-            )?;
-
-            Ok((false, None))
-        }
+        Ok(())
     }
 
     /// Cancel the currently active time entry (delete without saving)
@@ -592,8 +482,7 @@ impl Database {
             let mut entry_stmt = self.conn.prepare(
                 "
                 SELECT te.id, t.name, te.started_at, te.stopped_at,
-                    CAST(strftime('%s', COALESCE(te.stopped_at, datetime('now'))) AS INTEGER) - CAST(strftime('%s', te.started_at) AS INTEGER) as duration,
-                    te.billable_started_at, te.billable_stopped_at
+                    CAST(strftime('%s', COALESCE(te.stopped_at, datetime('now'))) AS INTEGER) - CAST(strftime('%s', te.started_at) AS INTEGER) as duration
                 FROM time_entries te
                 JOIN tasks t ON te.task_id = t.id
                 WHERE t.project_id = ?1
@@ -608,8 +497,6 @@ impl Database {
                     row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
                 ))
             })?;
 
@@ -617,22 +504,12 @@ impl Database {
             let mut tasks_map: HashMap<String, Vec<TimeEntryDetail>> = HashMap::new();
 
             for entry_result in entry_rows {
-                let (
-                    id,
-                    task_name,
-                    started_at_str,
-                    stopped_at_str,
-                    duration,
-                    billable_start_str,
-                    billable_stop_str,
-                ): (
+                let (id, task_name, started_at_str, stopped_at_str, duration): (
                     String,
                     String,
                     String,
                     Option<String>,
                     i64,
-                    Option<String>,
-                    Option<String>,
                 ) = entry_result?;
 
                 let started_at: DateTime<Utc> = started_at_str
@@ -654,33 +531,12 @@ impl Database {
 
                 let date = started_at.date_naive();
 
-                // Parse billable times if they exist
-                let parse_dt = |s: &str| -> Option<DateTime<Utc>> {
-                    s.parse()
-                        .or_else(|_| {
-                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-                                .map(|dt| dt.and_utc())
-                        })
-                        .ok()
-                };
-
-                let billable_started_at = billable_start_str.as_ref().and_then(|s| parse_dt(s));
-                let billable_stopped_at = billable_stop_str.as_ref().and_then(|s| parse_dt(s));
-
-                let billable_seconds = match (billable_started_at, billable_stopped_at) {
-                    (Some(s), Some(e)) => Some(e.signed_duration_since(s).num_seconds()),
-                    _ => None,
-                };
-
                 let entry = TimeEntryDetail {
                     id,
                     date,
                     started_at,
                     stopped_at,
                     duration_seconds: duration,
-                    billable_seconds,
-                    billable_started_at,
-                    billable_stopped_at,
                 };
 
                 tasks_map.entry(task_name).or_default().push(entry);
@@ -695,14 +551,9 @@ impl Database {
                 .into_iter()
                 .map(|(task_name, entries)| {
                     let total_seconds = entries.iter().map(|e| e.duration_seconds).sum();
-                    let billable_seconds = entries
-                        .iter()
-                        .map(|e| e.billable_seconds.unwrap_or(e.duration_seconds))
-                        .sum();
                     TaskSummary {
                         task_name,
                         total_seconds,
-                        billable_seconds,
                         entries,
                     }
                 })
@@ -711,12 +562,10 @@ impl Database {
             tasks.sort_by(|a, b| a.task_name.cmp(&b.task_name));
 
             let total_seconds: i64 = tasks.iter().map(|t| t.total_seconds).sum();
-            let billable_seconds: i64 = tasks.iter().map(|t| t.billable_seconds).sum();
 
             projects.push(ProjectSummary {
                 project_name,
                 total_seconds,
-                billable_seconds,
                 tasks,
             });
         }
@@ -731,9 +580,6 @@ impl Database {
             task_id: i64,
             started_at: DateTime<Utc>,
             stopped_at: DateTime<Utc>,
-            billable_started_at: Option<DateTime<Utc>>,
-            billable_stopped_at: Option<DateTime<Utc>>,
-            round_on_stop: bool,
         }
 
         let day_start = Self::local_datetime_to_utc(
@@ -744,7 +590,7 @@ impl Database {
 
         let mut stmt = self.conn.prepare(
             "
-            SELECT id, task_id, started_at, stopped_at, billable_started_at, billable_stopped_at, round_on_stop
+            SELECT id, task_id, started_at, stopped_at
             FROM time_entries
             WHERE stopped_at IS NOT NULL
               AND started_at >= ?1
@@ -764,15 +610,6 @@ impl Database {
                     task_id: row.get(1)?,
                     started_at: Self::parse_datetime(&row.get::<_, String>(2)?),
                     stopped_at: Self::parse_datetime(&row.get::<_, String>(3)?),
-                    billable_started_at: row
-                        .get::<_, Option<String>>(4)?
-                        .as_deref()
-                        .map(Self::parse_datetime),
-                    billable_stopped_at: row
-                        .get::<_, Option<String>>(5)?
-                        .as_deref()
-                        .map(Self::parse_datetime),
-                    round_on_stop: row.get::<_, i64>(6)? != 0,
                 })
             },
         )?;
@@ -807,36 +644,17 @@ impl Database {
 
             let first = &group[0];
             let last = group.last().expect("group is not empty");
-            let billable_started_at = group
-                .iter()
-                .filter_map(|entry| entry.billable_started_at)
-                .min();
-            let billable_stopped_at = group
-                .iter()
-                .filter_map(|entry| entry.billable_stopped_at)
-                .max();
-            let (billable_started_at, billable_stopped_at) =
-                match (billable_started_at, billable_stopped_at) {
-                    (Some(start), Some(stop)) => (Some(start), Some(stop)),
-                    _ => (None, None),
-                };
 
             self.conn.execute(
                 "
                 UPDATE time_entries
                 SET started_at = ?1,
-                    stopped_at = ?2,
-                    billable_started_at = ?3,
-                    billable_stopped_at = ?4,
-                    round_on_stop = ?5
-                WHERE id = ?6
+                    stopped_at = ?2
+                WHERE id = ?3
                 ",
                 params![
                     first.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                     last.stopped_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    billable_started_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-                    billable_stopped_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-                    last.round_on_stop,
                     first.id
                 ],
             )?;
@@ -858,11 +676,11 @@ impl Database {
         })
     }
 
-    /// Get the last stopped task (project_id, task_id, project_name, task_name, round_on_stop)
-    pub fn get_last_stopped_task(&self) -> Result<Option<(i64, i64, String, String, bool)>> {
-        let result: SqliteResult<(i64, i64, String, String, bool)> = self.conn.query_row(
+    /// Get the last stopped task (project_id, task_id, project_name, task_name)
+    pub fn get_last_stopped_task(&self) -> Result<Option<(i64, i64, String, String)>> {
+        let result: SqliteResult<(i64, i64, String, String)> = self.conn.query_row(
             "
-            SELECT t.project_id, t.id, p.name, t.name, te.round_on_stop
+            SELECT t.project_id, t.id, p.name, t.name
             FROM time_entries te
             JOIN tasks t ON te.task_id = t.id
             JOIN projects p ON t.project_id = p.id
@@ -872,13 +690,7 @@ impl Database {
             ",
             [],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get::<_, i64>(4)? != 0,
-                ))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             },
         );
 
@@ -941,7 +753,7 @@ mod tests {
         let task = db.get_or_create_task(project.id, "t").unwrap();
         let started_at = Utc.with_ymd_and_hms(2026, 10, 20, 8, 0, 0).unwrap();
         let stopped_at = Utc.with_ymd_and_hms(2026, 10, 20, 10, 0, 0).unwrap();
-        db.add_completed_time_entry(task.id, false, started_at, stopped_at)
+        db.add_completed_time_entry(task.id, started_at, stopped_at)
             .unwrap();
 
         let projects = db.get_log().unwrap();

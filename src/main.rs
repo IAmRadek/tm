@@ -33,9 +33,6 @@ enum Commands {
         project: String,
         /// Task name
         task: String,
-        /// Round start and end times to nearest 30 minutes when stopping
-        #[arg(short, long)]
-        round: bool,
         /// Override the start timestamp. Accepts HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339
         #[arg(long = "at", conflicts_with = "from_last_stop")]
         started_at: Option<String>,
@@ -67,9 +64,6 @@ enum Commands {
     Status,
     /// Show all projects and tasks with logged time
     Log {
-        /// Show actual times instead of billable times
-        #[arg(long)]
-        actual: bool,
         /// Show time ranges in today's log
         #[arg(short, long)]
         verbose: bool,
@@ -177,7 +171,6 @@ fn cmd_start(
     db: &Database,
     project: &str,
     task: &str,
-    round: bool,
     started_at: Option<&str>,
     from_last_stop: bool,
     eight_hours: bool,
@@ -211,7 +204,7 @@ fn cmd_start(
 
     if eight_hours {
         let stopped_at = started_at + chrono::Duration::hours(8);
-        if let Err(e) = db.add_completed_time_entry(task_entry.id, round, started_at, stopped_at) {
+        if let Err(e) = db.add_completed_time_entry(task_entry.id, started_at, stopped_at) {
             return eprintln!("Error adding time entry: {}", e);
         }
 
@@ -236,15 +229,11 @@ fn cmd_start(
         Ok(None) => {}
     }
 
-    if let Err(e) = db.start_time_entry(task_entry.id, round, started_at) {
+    if let Err(e) = db.start_time_entry(task_entry.id, started_at) {
         return eprintln!("Error starting time entry: {}", e);
     }
 
-    if round {
-        println!("Started tracking (rounded): {} / {}", project, task);
-    } else {
-        println!("Started tracking: {} / {}", project, task);
-    }
+    println!("Started tracking: {} / {}", project, task);
     notify_daemon(&DaemonMessage::Started {
         project: project.to_string(),
         task: task.to_string(),
@@ -293,14 +282,8 @@ fn cmd_stop(db: &Database, stopped_at: Option<&str>) {
     };
 
     match db.stop_active_entry(stopped_at) {
-        Ok((_rounded, billable_times)) => {
-            if let Some((start, end)) = billable_times {
-                let start_str = start.with_timezone(&Local).format("%H:%M");
-                let end_str = end.with_timezone(&Local).format("%H:%M");
-                println!("Stopped tracking (rounded: {} to {}).", start_str, end_str);
-            } else {
-                println!("Stopped tracking.");
-            }
+        Ok(_) => {
+            println!("Stopped tracking.");
             notify_daemon(&DaemonMessage::Stopped);
         }
         Err(DbError::NoActiveEntry) => println!("No active time entry."),
@@ -365,7 +348,7 @@ fn cmd_continue(db: &Database) {
         Ok(None) => {}
     }
 
-    let (_, task_id, project_name, task_name, round_on_stop) = match db.get_last_stopped_task() {
+    let (_, task_id, project_name, task_name) = match db.get_last_stopped_task() {
         Ok(Some(entry)) => entry,
         Ok(None) => return eprintln!("No previous task to continue."),
         Err(e) => return eprintln!("Error getting last task: {}", e),
@@ -373,7 +356,7 @@ fn cmd_continue(db: &Database) {
 
     let started_at = Utc::now();
 
-    if let Err(e) = db.start_time_entry(task_id, round_on_stop, started_at) {
+    if let Err(e) = db.start_time_entry(task_id, started_at) {
         return eprintln!("Error starting time entry: {}", e);
     }
 
@@ -455,33 +438,15 @@ struct EntryDisplayInfo {
 
 fn entry_display_info(
     entry: &tm::db::TimeEntryDetail,
-    billable_only: bool,
     now_local: DateTime<Local>,
 ) -> EntryDisplayInfo {
-    let (start, end, duration_seconds, is_active) = if billable_only {
-        let start = entry
-            .billable_started_at
-            .unwrap_or(entry.started_at)
-            .with_timezone(&Local);
-        let stopped_at = entry.billable_stopped_at.or(entry.stopped_at);
-        let end = stopped_at
-            .map(|dt| dt.with_timezone(&Local))
-            .unwrap_or(now_local);
-        let duration_seconds = entry.billable_seconds.unwrap_or(entry.duration_seconds);
-        (start, end, duration_seconds, stopped_at.is_none())
-    } else {
-        let start = entry.started_at.with_timezone(&Local);
-        let end = entry
-            .stopped_at
-            .map(|dt| dt.with_timezone(&Local))
-            .unwrap_or(now_local);
-        (
-            start,
-            end,
-            entry.duration_seconds,
-            entry.stopped_at.is_none(),
-        )
-    };
+    let start = entry.started_at.with_timezone(&Local);
+    let end = entry
+        .stopped_at
+        .map(|dt| dt.with_timezone(&Local))
+        .unwrap_or(now_local);
+    let duration_seconds = entry.duration_seconds;
+    let is_active = entry.stopped_at.is_none();
 
     EntryDisplayInfo {
         day: start.date_naive(),
@@ -497,7 +462,7 @@ fn entry_display_info(
     }
 }
 
-fn cmd_log_daily(projects: &[tm::db::ProjectSummary], billable_only: bool) {
+fn cmd_log_daily(projects: &[tm::db::ProjectSummary]) {
     struct DailyRange {
         start: DateTime<Local>,
         end: DateTime<Local>,
@@ -518,7 +483,7 @@ fn cmd_log_daily(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     for project in projects {
         for task in &project.tasks {
             for entry in &task.entries {
-                let info = entry_display_info(entry, billable_only, now_local);
+                let info = entry_display_info(entry, now_local);
                 let day_tasks = days.entry(info.day).or_default();
 
                 if let Some(existing) = day_tasks.iter_mut().find(|daily_task| {
@@ -623,7 +588,7 @@ fn cmd_log_daily(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     }
 }
 
-fn cmd_log_today(projects: &[tm::db::ProjectSummary], billable_only: bool, verbose: bool) {
+fn cmd_log_today(projects: &[tm::db::ProjectSummary], verbose: bool) {
     struct TodayRange {
         start: DateTime<Local>,
         end: DateTime<Local>,
@@ -645,7 +610,7 @@ fn cmd_log_today(projects: &[tm::db::ProjectSummary], billable_only: bool, verbo
     for project in projects {
         for task in &project.tasks {
             for entry in &task.entries {
-                let info = entry_display_info(entry, billable_only, now_local);
+                let info = entry_display_info(entry, now_local);
 
                 if info.day != today {
                     continue;
@@ -771,7 +736,7 @@ fn cmd_log_today(projects: &[tm::db::ProjectSummary], billable_only: bool, verbo
     }
 }
 
-fn cmd_log_monthly(projects: &[tm::db::ProjectSummary], billable_only: bool) {
+fn cmd_log_monthly(projects: &[tm::db::ProjectSummary]) {
     struct MonthlyTask {
         project_name: String,
         task_name: String,
@@ -785,7 +750,7 @@ fn cmd_log_monthly(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     for project in projects {
         for task in &project.tasks {
             for entry in &task.entries {
-                let info = entry_display_info(entry, billable_only, now_local);
+                let info = entry_display_info(entry, now_local);
                 let month_tasks = months
                     .entry((info.start.year(), info.start.month()))
                     .or_default();
@@ -850,7 +815,7 @@ fn cmd_log_monthly(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     }
 }
 
-fn cmd_log_calendar(projects: &[tm::db::ProjectSummary], billable_only: bool) {
+fn cmd_log_calendar(projects: &[tm::db::ProjectSummary]) {
     let now_local = Local::now();
     let today = now_local.date_naive();
     let mut months: BTreeMap<(i32, u32), BTreeMap<chrono::NaiveDate, i64>> = BTreeMap::new();
@@ -858,7 +823,7 @@ fn cmd_log_calendar(projects: &[tm::db::ProjectSummary], billable_only: bool) {
     for project in projects {
         for task in &project.tasks {
             for entry in &task.entries {
-                let info = entry_display_info(entry, billable_only, now_local);
+                let info = entry_display_info(entry, now_local);
                 if info.duration_seconds > 0 {
                     let month = (info.day.year(), info.day.month());
                     *months
@@ -1097,7 +1062,7 @@ fn calendar_full_day_lines(
     lines
 }
 
-fn cmd_log_calendar_full(projects: &[tm::db::ProjectSummary], billable_only: bool, all: bool) {
+fn cmd_log_calendar_full(projects: &[tm::db::ProjectSummary], all: bool) {
     let now_local = Local::now();
     let current_month = (now_local.year(), now_local.month());
     let layout = calendar_full_layout();
@@ -1107,7 +1072,7 @@ fn cmd_log_calendar_full(projects: &[tm::db::ProjectSummary], billable_only: boo
     for project in projects {
         for task in &project.tasks {
             for entry in &task.entries {
-                let info = entry_display_info(entry, billable_only, now_local);
+                let info = entry_display_info(entry, now_local);
                 if info.duration_seconds > 0 {
                     let month = (info.day.year(), info.day.month());
                     if !all && month != current_month {
@@ -1229,21 +1194,11 @@ fn cmd_log_calendar_full(projects: &[tm::db::ProjectSummary], billable_only: boo
     }
 }
 
-fn cmd_log_tasks(projects: &[tm::db::ProjectSummary], billable_only: bool) {
+fn cmd_log_tasks(projects: &[tm::db::ProjectSummary]) {
     let now_local = Local::now();
 
     for project in projects {
-        let project_time_str = if billable_only {
-            format_duration(project.billable_seconds)
-        } else if project.billable_seconds != project.total_seconds {
-            format!(
-                "{} / billable: {}",
-                format_duration(project.total_seconds),
-                format_duration(project.billable_seconds)
-            )
-        } else {
-            format_duration(project.total_seconds)
-        };
+        let project_time_str = format_duration(project.total_seconds);
 
         println!(
             "{} {} (total time: {})",
@@ -1253,17 +1208,7 @@ fn cmd_log_tasks(projects: &[tm::db::ProjectSummary], billable_only: bool) {
         );
 
         for task in &project.tasks {
-            let task_time_str = if billable_only {
-                format_duration(task.billable_seconds)
-            } else if task.billable_seconds != task.total_seconds {
-                format!(
-                    "{} / billable: {}",
-                    format_duration(task.total_seconds),
-                    format_duration(task.billable_seconds)
-                )
-            } else {
-                format_duration(task.total_seconds)
-            };
+            let task_time_str = format_duration(task.total_seconds);
 
             println!(
                 "  {} {} (total time: {})",
@@ -1275,22 +1220,9 @@ fn cmd_log_tasks(projects: &[tm::db::ProjectSummary], billable_only: bool) {
             let mut entries_data: Vec<(String, String, String, String)> = Vec::new();
 
             for entry in &task.entries {
-                let info = entry_display_info(entry, billable_only, now_local);
+                let info = entry_display_info(entry, now_local);
                 let date_str = format_log_date(info.day);
-                let duration = if billable_only {
-                    format_duration(entry.billable_seconds.unwrap_or(entry.duration_seconds))
-                } else {
-                    match entry.billable_seconds {
-                        Some(billable) if billable != entry.duration_seconds => {
-                            format!(
-                                "{} / billable: {}",
-                                format_duration(entry.duration_seconds),
-                                format_duration(billable)
-                            )
-                        }
-                        _ => format_duration(entry.duration_seconds),
-                    }
-                };
+                let duration = format_duration(entry.duration_seconds);
 
                 entries_data.push((date_str, info.time_range, duration, entry.id.clone()));
             }
@@ -1318,7 +1250,6 @@ fn cmd_log_tasks(projects: &[tm::db::ProjectSummary], billable_only: bool) {
 
 fn cmd_log(
     db: &Database,
-    billable_only: bool,
     daily: bool,
     monthly: bool,
     calendar: bool,
@@ -1335,7 +1266,7 @@ fn cmd_log(
                     return;
                 }
 
-                cmd_log_daily(&projects, billable_only);
+                cmd_log_daily(&projects);
                 return;
             }
 
@@ -1345,17 +1276,17 @@ fn cmd_log(
                     return;
                 }
 
-                cmd_log_monthly(&projects, billable_only);
+                cmd_log_monthly(&projects);
                 return;
             }
 
             if calendar {
-                cmd_log_calendar(&projects, billable_only);
+                cmd_log_calendar(&projects);
                 return;
             }
 
             if calendar_full {
-                cmd_log_calendar_full(&projects, billable_only, all);
+                cmd_log_calendar_full(&projects, all);
                 return;
             }
 
@@ -1365,11 +1296,11 @@ fn cmd_log(
                     return;
                 }
 
-                cmd_log_tasks(&projects, billable_only);
+                cmd_log_tasks(&projects);
                 return;
             }
 
-            cmd_log_today(&projects, billable_only, verbose);
+            cmd_log_today(&projects, verbose);
         }
         Err(e) => eprintln!("Error getting log: {}", e),
     }
@@ -1398,7 +1329,6 @@ fn main() {
         Commands::Start {
             project,
             task,
-            round,
             started_at,
             from_last_stop,
             eight_hours,
@@ -1406,7 +1336,6 @@ fn main() {
             &db,
             &project,
             &task,
-            round,
             started_at.as_deref(),
             from_last_stop,
             eight_hours,
@@ -1419,7 +1348,6 @@ fn main() {
         Commands::Stop { stopped_at } => cmd_stop(&db, stopped_at.as_deref()),
         Commands::Status => cmd_status(&db),
         Commands::Log {
-            actual,
             verbose,
             daily,
             monthly,
@@ -1429,7 +1357,6 @@ fn main() {
             tasks,
         } => cmd_log(
             &db,
-            !actual,
             daily,
             monthly,
             calendar,
