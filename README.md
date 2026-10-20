@@ -32,6 +32,9 @@ tm amend <id> --started-at "2026-04-07 09:30" --stopped-at "2026-04-07 11:00"
 # Check status
 tm status
 
+# One line for a status bar: "project / task · elapsed", exit code 1 when idle
+tm status --short
+
 # Stop tracking
 tm stop
 

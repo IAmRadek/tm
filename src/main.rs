@@ -61,7 +61,11 @@ enum Commands {
         stopped_at: Option<String>,
     },
     /// Show the currently active task
-    Status,
+    Status {
+        /// Print "project / task · elapsed", or nothing with exit code 1 when idle
+        #[arg(long)]
+        short: bool,
+    },
     /// Show all projects and tasks with logged time
     Log {
         /// Show time ranges in today's log
@@ -294,12 +298,20 @@ fn cmd_stop(db: &Database, stopped_at: Option<&str>) {
     }
 }
 
-fn cmd_status(db: &Database) {
+fn cmd_status(db: &Database, short: bool) {
     match db.get_active_entry() {
         Ok(Some(entry)) => {
             let elapsed = Utc::now()
                 .signed_duration_since(entry.started_at)
                 .num_seconds();
+            if short {
+                return println!(
+                    "{} / {} · {}",
+                    entry.project_name,
+                    entry.task_name,
+                    format_duration(elapsed)
+                );
+            }
             println!(
                 "Tracking: {} / {} ({})",
                 entry.project_name,
@@ -307,8 +319,14 @@ fn cmd_status(db: &Database) {
                 format_duration(elapsed)
             );
         }
+        Ok(None) if short => std::process::exit(1),
         Ok(None) => println!("No active time entry."),
-        Err(e) => eprintln!("Error getting status: {}", e),
+        Err(e) => {
+            eprintln!("Error getting status: {}", e);
+            if short {
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -1346,7 +1364,7 @@ fn main() {
             stopped_at,
         } => cmd_amend(&db, &id, started_at.as_deref(), stopped_at.as_deref()),
         Commands::Stop { stopped_at } => cmd_stop(&db, stopped_at.as_deref()),
-        Commands::Status => cmd_status(&db),
+        Commands::Status { short } => cmd_status(&db, short),
         Commands::Log {
             verbose,
             daily,

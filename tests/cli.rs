@@ -13,6 +13,7 @@ struct Tm {
 struct Output {
     stdout: String,
     stderr: String,
+    code: Option<i32>,
 }
 
 impl Tm {
@@ -37,6 +38,7 @@ impl Tm {
         Output {
             stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
             stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+            code: output.status.code(),
         }
     }
 }
@@ -121,6 +123,35 @@ fn stop_at_before_start_is_refused() {
         status.stdout
     );
     tm.run(&["cancel"]);
+}
+
+#[test]
+fn status_short_prints_running_task_with_elapsed_time() {
+    let tm = Tm::new();
+    tm.run(&["start", "acme", "review", "--at", "2026-01-01 09:00"]);
+
+    let status = tm.run(&["status", "--short"]);
+
+    assert_eq!(status.code, Some(0));
+    assert!(
+        status.stdout.starts_with("acme / review · "),
+        "{}",
+        status.stdout
+    );
+    assert!(status.stdout.ends_with("s\n"), "{}", status.stdout);
+    assert_eq!(status.stdout.lines().count(), 1);
+    tm.run(&["cancel"]);
+}
+
+#[test]
+fn status_short_prints_nothing_and_fails_when_idle() {
+    let tm = Tm::new();
+
+    let status = tm.run(&["status", "--short"]);
+
+    assert_eq!(status.code, Some(1));
+    assert_eq!(status.stdout, "");
+    assert_eq!(status.stderr, "");
 }
 
 #[test]
