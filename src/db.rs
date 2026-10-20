@@ -592,7 +592,7 @@ impl Database {
             let mut entry_stmt = self.conn.prepare(
                 "
                 SELECT te.id, t.name, te.started_at, te.stopped_at,
-                    CAST((julianday(COALESCE(te.stopped_at, datetime('now'))) - julianday(te.started_at)) * 86400 AS INTEGER) as duration,
+                    CAST(strftime('%s', COALESCE(te.stopped_at, datetime('now'))) AS INTEGER) - CAST(strftime('%s', te.started_at) AS INTEGER) as duration,
                     te.billable_started_at, te.billable_stopped_at
                 FROM time_entries te
                 JOIN tasks t ON te.task_id = t.id
@@ -919,5 +919,34 @@ impl Database {
             ",
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_in_memory() -> Database {
+        let db = Database {
+            conn: Connection::open_in_memory().expect("open in-memory database"),
+        };
+        db.init_schema().expect("init schema");
+        db
+    }
+
+    #[test]
+    fn get_log_reports_whole_seconds_for_two_hour_entry() {
+        let db = open_in_memory();
+        let project = db.get_or_create_project("p").unwrap();
+        let task = db.get_or_create_task(project.id, "t").unwrap();
+        let started_at = Utc.with_ymd_and_hms(2026, 10, 20, 8, 0, 0).unwrap();
+        let stopped_at = Utc.with_ymd_and_hms(2026, 10, 20, 10, 0, 0).unwrap();
+        db.add_completed_time_entry(task.id, false, started_at, stopped_at)
+            .unwrap();
+
+        let projects = db.get_log().unwrap();
+
+        let entry = &projects[0].tasks[0].entries[0];
+        assert_eq!(entry.duration_seconds, 2 * 60 * 60);
     }
 }
