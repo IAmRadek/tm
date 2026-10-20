@@ -19,10 +19,10 @@ tm start myproject "implement feature"
 tm start myproject "implement feature" --round
 
 # Start at a specific time today
-tm start myproject "implement feature" --started-at 09:30
+tm start myproject "implement feature" --at 09:30
 
 # Start at a specific date and time
-tm start myproject "implement feature" --started-at "2026-04-07 09:30"
+tm start myproject "implement feature" --at "2026-04-07 09:30"
 
 # Start from the stop time of the last finished entry
 tm start myproject "review PR" --from-last-stop
@@ -37,6 +37,9 @@ tm status
 
 # Stop tracking
 tm stop
+
+# Stop at a specific time
+tm stop --at 12:00
 
 # Continue last task
 tm continue

@@ -37,12 +37,12 @@ enum Commands {
         #[arg(short, long)]
         round: bool,
         /// Override the start timestamp. Accepts HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339
-        #[arg(long, conflicts_with = "from_last_stop")]
+        #[arg(long = "at", conflicts_with = "from_last_stop")]
         started_at: Option<String>,
         /// Start from the stop time of the most recently finished entry
         #[arg(long)]
         from_last_stop: bool,
-        /// Add a completed 8-hour entry starting at --started-at
+        /// Add a completed 8-hour entry starting at --at
         #[arg(long = "8h", alias = "eight-hours", requires = "started_at")]
         eight_hours: bool,
     },
@@ -58,7 +58,11 @@ enum Commands {
         stopped_at: Option<String>,
     },
     /// Stop the currently active time entry
-    Stop,
+    Stop {
+        /// Override the stop timestamp. Accepts HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339
+        #[arg(long = "at")]
+        stopped_at: Option<String>,
+    },
     /// Show the currently active task
     Status,
     /// Show all projects and tasks with logged time
@@ -191,7 +195,7 @@ fn cmd_start(
     let started_at = if let Some(value) = started_at {
         match parse_timestamp(value) {
             Ok(dt) => dt,
-            Err(e) => return eprintln!("Error parsing --started-at: {}", e),
+            Err(e) => return eprintln!("Error parsing --at: {}", e),
         }
     } else if from_last_stop {
         match db.get_last_stopped_at() {
@@ -279,8 +283,16 @@ fn cmd_amend(db: &Database, id: &str, started_at: Option<&str>, stopped_at: Opti
     }
 }
 
-fn cmd_stop(db: &Database) {
-    match db.stop_active_entry() {
+fn cmd_stop(db: &Database, stopped_at: Option<&str>) {
+    let stopped_at = match stopped_at {
+        Some(value) => match parse_timestamp(value) {
+            Ok(dt) => dt,
+            Err(e) => return eprintln!("Error parsing --at: {}", e),
+        },
+        None => Utc::now(),
+    };
+
+    match db.stop_active_entry(stopped_at) {
         Ok((_rounded, billable_times)) => {
             if let Some((start, end)) = billable_times {
                 let start_str = start.with_timezone(&Local).format("%H:%M");
@@ -292,6 +304,9 @@ fn cmd_stop(db: &Database) {
             notify_daemon(&DaemonMessage::Stopped);
         }
         Err(DbError::NoActiveEntry) => println!("No active time entry."),
+        Err(DbError::InvalidTimeRange) => {
+            eprintln!("Invalid time range: --at must be after the start time.")
+        }
         Err(e) => eprintln!("Error stopping time entry: {}", e),
     }
 }
@@ -1401,7 +1416,7 @@ fn main() {
             started_at,
             stopped_at,
         } => cmd_amend(&db, &id, started_at.as_deref(), stopped_at.as_deref()),
-        Commands::Stop => cmd_stop(&db),
+        Commands::Stop { stopped_at } => cmd_stop(&db, stopped_at.as_deref()),
         Commands::Status => cmd_status(&db),
         Commands::Log {
             actual,

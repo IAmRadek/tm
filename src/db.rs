@@ -450,7 +450,7 @@ impl Database {
     }
 
     /// Stop the currently active time entry, returns (rounded, Option<(billable_start, billable_end)>)
-    pub fn stop_active_entry(&self) -> Result<(bool, BillableTimes)> {
+    pub fn stop_active_entry(&self, stopped_at: DateTime<Utc>) -> Result<(bool, BillableTimes)> {
         // Check if there's an active entry and if it should be rounded
         let (entry_id, started_at_str, round_on_stop): (String, String, bool) = self
             .conn
@@ -464,17 +464,19 @@ impl Database {
                 _ => DbError::Sqlite(e),
             })?;
 
-        let stopped_at = Utc::now();
+        let started_at: DateTime<Utc> = started_at_str
+            .parse()
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(&started_at_str, "%Y-%m-%d %H:%M:%S")
+                    .map(|dt| dt.and_utc())
+            })
+            .unwrap_or_else(|_| Utc::now());
+
+        if stopped_at < started_at {
+            return Err(DbError::InvalidTimeRange);
+        }
 
         if round_on_stop {
-            let started_at: DateTime<Utc> = started_at_str
-                .parse()
-                .or_else(|_| {
-                    chrono::NaiveDateTime::parse_from_str(&started_at_str, "%Y-%m-%d %H:%M:%S")
-                        .map(|dt| dt.and_utc())
-                })
-                .unwrap_or_else(|_| Utc::now());
-
             let billable_start = Self::round_down_to_30min(started_at);
             let billable_stop = Self::round_up_to_30min(stopped_at);
 
