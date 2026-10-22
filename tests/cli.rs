@@ -141,6 +141,77 @@ fn log_daily_day_span_ends_at_latest_stop_of_overlapping_entries() {
 }
 
 #[test]
+fn log_json_without_entries_prints_empty_array() {
+    let tm = Tm::new();
+
+    let log = tm.run(&["log", "--json"]);
+
+    assert_eq!(log.stdout, "[]\n");
+}
+
+#[test]
+fn log_json_lists_todays_entries() {
+    let tm = Tm::new();
+    tm.run(&["start", "acme", "review", "--at", "09:00"]);
+    tm.run(&["stop", "--at", "10:30"]);
+
+    let log = tm.run(&["log", "--json"]);
+
+    assert!(log.stdout.contains("\"id\": \""), "{}", log.stdout);
+    assert!(
+        log.stdout.contains("\"project\": \"acme\""),
+        "{}",
+        log.stdout
+    );
+    assert!(
+        log.stdout.contains("\"task\": \"review\""),
+        "{}",
+        log.stdout
+    );
+    assert!(log.stdout.contains("T09:00:00"), "{}", log.stdout);
+    assert!(log.stdout.contains("T10:30:00"), "{}", log.stdout);
+    assert!(
+        log.stdout.contains("\"duration_seconds\": 5400"),
+        "{}",
+        log.stdout
+    );
+}
+
+#[test]
+fn log_json_shows_running_entry_with_null_stop() {
+    let tm = Tm::new();
+    tm.run(&["start", "acme", "review", "--at", "00:00"]);
+
+    let log = tm.run(&["log", "--json"]);
+
+    assert!(
+        log.stdout.contains("\"stopped_at\": null"),
+        "{}",
+        log.stdout
+    );
+    tm.run(&["cancel"]);
+}
+
+#[test]
+fn log_json_day_lists_entries_of_that_day() {
+    let tm = Tm::new();
+    tm.run(&["start", "acme", "review", "--at", "2026-01-01 09:00"]);
+    tm.run(&["stop", "--at", "2026-01-01 10:00"]);
+    tm.run(&["start", "acme", "deploy", "--at", "09:00"]);
+    tm.run(&["stop", "--at", "09:30"]);
+
+    let log = tm.run(&["log", "--json", "--day", "2026-01-01"]);
+
+    assert!(log.stdout.contains("2026-01-01T09:00:00"), "{}", log.stdout);
+    assert!(
+        log.stdout.contains("\"task\": \"review\""),
+        "{}",
+        log.stdout
+    );
+    assert!(!log.stdout.contains("deploy"), "{}", log.stdout);
+}
+
+#[test]
 fn stop_at_before_start_is_refused() {
     let tm = Tm::new();
     tm.run(&["start", "acme", "review", "--at", "10:00"]);

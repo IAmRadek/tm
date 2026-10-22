@@ -90,6 +90,12 @@ enum Commands {
         /// Show all tasks and their entries
         #[arg(long)]
         tasks: bool,
+        /// Print the entries of one day as JSON
+        #[arg(long, conflicts_with_all = ["verbose", "daily", "monthly", "calendar", "calendar_full", "tasks"])]
+        json: bool,
+        /// Day for --json in YYYY-MM-DD format
+        #[arg(long, requires = "json")]
+        day: Option<String>,
     },
     /// Clear all entries from the database
     Clear,
@@ -1272,6 +1278,55 @@ fn cmd_log_tasks(projects: &[tm::db::ProjectSummary]) {
     }
 }
 
+fn cmd_log_json(projects: &[tm::db::ProjectSummary], day: Option<&str>) {
+    #[derive(serde::Serialize)]
+    struct JsonEntry<'a> {
+        id: &'a str,
+        project: &'a str,
+        task: &'a str,
+        started_at: DateTime<Local>,
+        stopped_at: Option<DateTime<Local>>,
+        duration_seconds: i64,
+    }
+
+    let day = match day {
+        Some(value) => match parse_day(value) {
+            Ok(day) => day,
+            Err(e) => return eprintln!("Error parsing --day: {}", e),
+        },
+        None => Local::now().date_naive(),
+    };
+
+    let mut entries: Vec<JsonEntry> = Vec::new();
+
+    for project in projects {
+        for task in &project.tasks {
+            for entry in &task.entries {
+                let started_at = entry.started_at.with_timezone(&Local);
+                if started_at.date_naive() != day {
+                    continue;
+                }
+
+                entries.push(JsonEntry {
+                    id: &entry.id,
+                    project: &project.project_name,
+                    task: &task.task_name,
+                    started_at,
+                    stopped_at: entry.stopped_at.map(|dt| dt.with_timezone(&Local)),
+                    duration_seconds: entry.duration_seconds,
+                });
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| a.started_at.cmp(&b.started_at).then_with(|| a.id.cmp(b.id)));
+
+    match serde_json::to_string_pretty(&entries) {
+        Ok(json) => println!("{}", json),
+        Err(e) => eprintln!("Error serializing log: {}", e),
+    }
+}
+
 fn cmd_log(
     db: &Database,
     daily: bool,
@@ -1281,9 +1336,16 @@ fn cmd_log(
     all: bool,
     tasks: bool,
     verbose: bool,
+    json: bool,
+    day: Option<&str>,
 ) {
     match db.get_log() {
         Ok(projects) => {
+            if json {
+                cmd_log_json(&projects, day);
+                return;
+            }
+
             if daily {
                 if projects.is_empty() {
                     println!("No projects found.");
@@ -1384,6 +1446,8 @@ fn main() {
             calendar_full,
             all,
             tasks,
+            json,
+            day,
         } => cmd_log(
             &db,
             daily,
@@ -1393,6 +1457,8 @@ fn main() {
             all,
             tasks,
             verbose,
+            json,
+            day.as_deref(),
         ),
         Commands::Clear => cmd_clear(&db),
         Commands::Continue => cmd_continue(&db),
