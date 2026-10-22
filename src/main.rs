@@ -559,10 +559,10 @@ fn cmd_log_daily(projects: &[tm::db::ProjectSummary]) {
                 });
             }
 
-            if let Some(range) = task.ranges.last() {
+            if let Some(end) = task.ranges.iter().map(|range| range.end).max() {
                 day_end = Some(match day_end {
-                    Some(current) => current.max(range.end),
-                    None => range.end,
+                    Some(current) => current.max(end),
+                    None => end,
                 });
             }
         }
@@ -683,10 +683,10 @@ fn cmd_log_today(projects: &[tm::db::ProjectSummary], verbose: bool) {
             });
         }
 
-        if let Some(range) = task.ranges.last() {
+        if let Some(end) = task.ranges.iter().map(|range| range.end).max() {
             day_end = Some(match day_end {
-                Some(current) => current.max(range.end),
-                None => range.end,
+                Some(current) => current.max(end),
+                None => end,
             });
         }
     }

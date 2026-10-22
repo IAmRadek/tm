@@ -105,6 +105,42 @@ fn log_verbose_shows_day_span_and_ranges() {
 }
 
 #[test]
+fn log_verbose_day_span_ends_at_latest_stop_of_overlapping_entries() {
+    let tm = Tm::new();
+    tm.run(&["start", "acme", "review", "--at", "09:00"]);
+    tm.run(&["stop", "--at", "12:00"]);
+    tm.run(&["start", "acme", "review", "--at", "10:00"]);
+    tm.run(&["stop", "--at", "10:30"]);
+
+    let log = tm.run(&["log", "--verbose"]);
+
+    assert!(
+        log.stdout
+            .contains("(from 09:00 to 12:00, total time: 3h 30m)"),
+        "{}",
+        log.stdout
+    );
+}
+
+#[test]
+fn log_daily_day_span_ends_at_latest_stop_of_overlapping_entries() {
+    let tm = Tm::new();
+    tm.run(&["start", "acme", "review", "--at", "09:00"]);
+    tm.run(&["stop", "--at", "12:00"]);
+    tm.run(&["start", "acme", "review", "--at", "10:00"]);
+    tm.run(&["stop", "--at", "10:30"]);
+
+    let log = tm.run(&["log", "--daily"]);
+
+    assert!(
+        log.stdout
+            .contains("(from 09:00 to 12:00, total time: 3h 30m)"),
+        "{}",
+        log.stdout
+    );
+}
+
+#[test]
 fn stop_at_before_start_is_refused() {
     let tm = Tm::new();
     tm.run(&["start", "acme", "review", "--at", "10:00"]);
