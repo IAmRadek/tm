@@ -191,11 +191,11 @@ fn status_short_prints_nothing_and_fails_when_idle() {
 }
 
 #[test]
-fn squash_merges_fragments_of_one_task() {
+fn squash_merges_touching_fragments_of_one_task() {
     let tm = Tm::new();
     tm.run(&["start", "acme", "review", "--at", "09:00"]);
     tm.run(&["stop", "--at", "09:30"]);
-    tm.run(&["start", "acme", "review", "--at", "09:45"]);
+    tm.run(&["start", "acme", "review", "--at", "09:30"]);
     tm.run(&["stop", "--at", "10:15"]);
 
     tm.run(&["squash"]);
@@ -204,5 +204,35 @@ fn squash_merges_fragments_of_one_task() {
     assert_eq!(
         task_lines(&log.stdout),
         vec!["  - acme / review (1h 15m) 09:00 to 10:15"]
+    );
+}
+
+#[test]
+fn squash_keeps_fragments_separated_by_a_gap() {
+    let tm = Tm::new();
+    tm.run(&["start", "acme", "review", "--at", "09:45"]);
+    tm.run(&["stop", "--at", "10:00"]);
+    tm.run(&["start", "acme", "daily", "--at", "10:00"]);
+    tm.run(&["stop", "--at", "10:27"]);
+    tm.run(&["start", "acme", "review", "--at", "10:27"]);
+    tm.run(&["stop", "--at", "10:50"]);
+    tm.run(&["start", "acme", "review", "--at", "10:50"]);
+    tm.run(&["stop", "--at", "11:00"]);
+
+    tm.run(&["squash"]);
+    let log = tm.run(&["log", "--verbose"]);
+
+    assert!(
+        log.stdout
+            .contains("(from 09:45 to 11:00, total time: 1h 15m)"),
+        "{}",
+        log.stdout
+    );
+    assert_eq!(
+        task_lines(&log.stdout),
+        vec![
+            "  - acme / review (48m) 09:45 to 10:00, 10:27 to 11:00",
+            "  - acme / daily (27m) 10:00 to 10:27",
+        ]
     );
 }

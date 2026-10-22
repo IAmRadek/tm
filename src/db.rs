@@ -638,36 +638,58 @@ impl Database {
         let mut deleted_entries = 0;
 
         for group in groups {
-            if group.len() < 2 {
-                continue;
+            // A run is a list of fragments that touch or overlap. A gap starts a new run.
+            let mut runs: Vec<(Vec<SquashCandidate>, DateTime<Utc>)> = Vec::new();
+            for candidate in group {
+                match runs.last_mut() {
+                    Some((run, run_end)) if candidate.started_at <= *run_end => {
+                        *run_end = (*run_end).max(candidate.stopped_at);
+                        run.push(candidate);
+                    }
+                    _ => {
+                        let run_end = candidate.stopped_at;
+                        runs.push((vec![candidate], run_end));
+                    }
+                }
             }
 
-            let first = &group[0];
-            let last = group.last().expect("group is not empty");
+            let mut squashed = false;
 
-            self.conn.execute(
-                "
-                UPDATE time_entries
-                SET started_at = ?1,
-                    stopped_at = ?2
-                WHERE id = ?3
-                ",
-                params![
-                    first.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    last.stopped_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    first.id
-                ],
-            )?;
+            for (run, run_end) in runs {
+                if run.len() < 2 {
+                    continue;
+                }
 
-            for duplicate in group.iter().skip(1) {
+                let first = &run[0];
+
                 self.conn.execute(
-                    "DELETE FROM time_entries WHERE id = ?1",
-                    params![duplicate.id],
+                    "
+                    UPDATE time_entries
+                    SET started_at = ?1,
+                        stopped_at = ?2
+                    WHERE id = ?3
+                    ",
+                    params![
+                        first.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        run_end.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        first.id
+                    ],
                 )?;
-                deleted_entries += 1;
+
+                for duplicate in run.iter().skip(1) {
+                    self.conn.execute(
+                        "DELETE FROM time_entries WHERE id = ?1",
+                        params![duplicate.id],
+                    )?;
+                    deleted_entries += 1;
+                }
+
+                squashed = true;
             }
 
-            squashed_tasks += 1;
+            if squashed {
+                squashed_tasks += 1;
+            }
         }
 
         Ok(SquashResult {
