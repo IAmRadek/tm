@@ -3,7 +3,7 @@
 // for the knob:
 //   Left / Right     rotate one detent (row up / row down)
 //   Enter or Space   the knob's button: click, double click, long press
-//   Esc              quit
+//   Esc              hide the window, as the close row does; the app keeps running
 // The drums show tm's database, read again each time the window shows and after each write;
 // start, stop and discard run the tm CLI, which writes it and tells tm-daemon.
 use std::process::Command;
@@ -709,7 +709,7 @@ fn main() {
     macos::set_accessory();
     unsafe { macos::move_to_active_space(rl.get_window_handle()) };
     rl.set_target_fps(60);
-    // Esc goes back from the input screen, so the loop decides when it quits
+    // Esc goes back from the input screen and hides the window elsewhere; nothing quits the app
     rl.set_exit_key(None);
     // SAFETY: the call stores blend factors in rlgl's global state and makes no GL call; this is
     // the only thread that touches rlgl, and raylib::init above set that state up. raylib's alpha
@@ -834,7 +834,7 @@ fn main() {
             }
         } else {
             if rl.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
-                break;
+                app.close = true;
             }
             if key(KeyboardKey::KEY_RIGHT) {
                 gestures.push(Gesture::Cw);
@@ -865,8 +865,8 @@ fn main() {
         for g in gestures.drain(..) {
             app.apply(g);
         }
-        // a hidden window waits for the knob, which may be plugged in again later; Esc quits.
-        // An unplugged knob closes the window with it
+        // a hidden window waits for the knob, which may be plugged in again later. An unplugged
+        // knob closes the window with it
         if device.check(&mut lights) || app.last_input.elapsed() >= CLOSE_IDLE {
             app.close = true;
         }

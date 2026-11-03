@@ -579,13 +579,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "modal_poc"
-version = "0.1.0"
-dependencies = [
- "raylib",
-]
-
-[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
