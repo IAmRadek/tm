@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use raylib::prelude::*;
 
+mod macos;
+
 // the layout is drawn on a W × H canvas and zoomed by SCALE into the window
 const W: f32 = 360.0;
 const H: f32 = 320.0;
@@ -466,16 +468,34 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 type Canvas<'a, 'b, 'c> = RaylibMode2D<'a, RaylibBlendMode<'b, RaylibDrawHandle<'c>>>;
 
 fn main() {
+    // the device calls back on midir's thread, so its events wait in a channel for the next frame;
+    // the connection lives as long as `_knob`
+    let (knob_tx, knob_rx) = mpsc::channel();
+    let _knob = timebuzzer::listen(move |event| {
+        let _ = knob_tx.send(event);
+    });
+    if _knob.is_none() {
+        eprintln!("tm-buzzer: no timebuzzer found, using the keyboard only");
+    }
+    // with a knob the app starts hidden and waits for its button; without one it shows at once
+    let mut visible = _knob.is_none();
+
     let (window_w, window_h) = ((W * SCALE) as i32, (H * SCALE) as i32);
-    let (mut rl, thread) = raylib::init()
+    let mut builder = raylib::init();
+    builder
         .size(window_w, window_h)
         .title("tm")
         .transparent()
         .undecorated()
         .highdpi()
         .topmost()
-        .msaa_4x()
-        .build();
+        .msaa_4x();
+    if !visible {
+        builder.hidden();
+    }
+    let (mut rl, thread) = builder.build();
+    macos::set_accessory();
+    unsafe { macos::move_to_active_space(rl.get_window_handle()) };
     rl.set_target_fps(60);
     // Esc goes back from the input screen, so the loop decides when it quits
     rl.set_exit_key(None);
@@ -528,15 +548,6 @@ fn main() {
         entry: String::new(),
         close: false,
     };
-    // the device calls back on midir's thread, so its events wait in a channel for the next frame;
-    // the connection lives as long as `_knob`
-    let (knob_tx, knob_rx) = mpsc::channel();
-    let _knob = timebuzzer::listen(move |event| {
-        let _ = knob_tx.send(event);
-    });
-    if _knob.is_none() {
-        eprintln!("tm-buzzer: no timebuzzer found, using the keyboard only");
-    }
     let mut button = Button::default();
     // the knob's button has its own state, so a key and the knob never make one gesture together
     let mut knob = Button::default();
@@ -544,31 +555,27 @@ fn main() {
     // the header command and when it changed, for typing it out
     let mut command = String::new();
     let mut command_at = Instant::now();
-    // with a knob the app starts hidden and waits for its button; without one it shows at once
     let hidden = WindowState::default().set_window_hidden(true);
-    let mut visible = _knob.is_none();
-    if !visible {
-        rl.set_window_state(hidden);
-    }
 
     while !rl.window_should_close() {
         if !visible {
-            // a press shows the window; turns and the release of that press do nothing, because the
-            // knob's button never saw the press
-            match knob_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(timebuzzer::Event::ClickDown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    rl.clear_window_state(hidden);
-                    rl.set_window_focused();
-                    app.go_home();
-                    app.last_input = Instant::now();
-                    app.flash = None;
-                    visible = true;
+            // nothing is on screen, so draw no frames until the knob's button goes down; turns and
+            // the release of that press do nothing, because the knob's button never saw the press
+            loop {
+                match knob_rx.recv() {
+                    Ok(timebuzzer::Event::ClickDown) => break,
+                    Ok(_) => {}
+                    Err(_) => return,
                 }
-                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            // an empty frame: ending it polls the window's events, which keeps the app responsive
-            drop(rl.begin_drawing(&thread));
-            continue;
+            rl.clear_window_state(hidden);
+            rl.set_window_focused();
+            app.go_home();
+            app.last_input = Instant::now();
+            app.flash = None;
+            // the header types its command out again
+            command.clear();
+            visible = true;
         }
         let now = rl.get_time();
         let dt = rl.get_frame_time().min(1.0 / 30.0);
@@ -634,6 +641,7 @@ fn main() {
                 break;
             }
             rl.set_window_state(hidden);
+            macos::hide();
             visible = false;
             continue;
         }
