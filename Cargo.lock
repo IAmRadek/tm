@@ -1158,7 +1158,9 @@ dependencies = [
 name = "tm-buzzer"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "raylib",
+ "rusqlite",
  "timebuzzer",
 ]
 

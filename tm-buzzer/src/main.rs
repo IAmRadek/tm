@@ -41,6 +41,10 @@ const BAND: f32 = 32.0;
 const BAND_LIVE: f32 = 48.0;
 const BAND_Y: f32 = 166.0;
 const RULE_Y: f32 = 36.0;
+// the text size of an action row (close, stop, back, + new ...) against a project or task row
+const ACTION_SIZE: f32 = 0.85;
+// the running entry's row on the tracking drum, after close, cancel and stop
+const CURRENT: usize = 3;
 
 // whoami's terminal palette: phosphor green on near-black
 const PANEL: Color = Color::new(10, 12, 10, 255);
@@ -48,6 +52,30 @@ const GREEN: Color = Color::new(51, 255, 102, 255);
 const DIM: Color = Color::new(51, 255, 102, 120);
 const GLOW: Color = Color::new(51, 255, 102, 50);
 const DANGER: Color = Color::new(255, 85, 85, 255);
+// the dashes of the band's outline around a selected action
+const DASH: f32 = 5.0;
+const DASH_GAP: f32 = 4.0;
+
+// the knob's three LED zones, each channel 0 to 127: the phosphor green, dim while tracking and
+// bright in the center while the window is open; red while a cancel waits for its confirmation
+const LED_TRACK: timebuzzer::Color = timebuzzer::Color { r: 6, g: 40, b: 12 };
+const LED_OPEN: timebuzzer::Color = timebuzzer::Color { r: 25, g: 127, b: 51 };
+const LED_IDLE_OPEN: timebuzzer::Color = timebuzzer::Color { r: 3, g: 20, b: 6 };
+// the cancel confirmation pulses all zones red, once per LED_PULSE, between these fractions of
+// full red
+const LED_PULSE: Duration = Duration::from_secs(1);
+const LED_PULSE_LOW: f32 = 0.1;
+const LED_PULSE_HIGH: f32 = 1.0;
+const LED_RESEND: Duration = Duration::from_millis(150);
+// the hidden tracking wave: one pass over the zones per LED_WAVE, each zone between these
+// fractions of LED_WAVE_COLOR, a violet of red and blue, written every LED_FRAME
+const LED_WAVE_COLOR: timebuzzer::Color = timebuzzer::Color { r: 64, g: 0, b: 127 };
+const LED_WAVE: Duration = Duration::from_secs(3);
+const LED_WAVE_LOW: f32 = 0.1;
+const LED_WAVE_HIGH: f32 = 1.0;
+const LED_FRAME: Duration = Duration::from_millis(50);
+// how often the hidden app reads the database, so the LEDs follow tm's CLI
+const HIDDEN_POLL: Duration = Duration::from_secs(2);
 
 enum Gesture {
     Cw,
@@ -189,7 +217,8 @@ impl App {
             Screen::Home => match &self.running {
                 Some(r) => {
                     let current = (r.project, r.task);
-                    let mut rows = vec![Row::Cancel, Row::Stop, Row::Current];
+                    // close is the top row on every drum, one detent up from the default row
+                    let mut rows = vec![Row::Close, Row::Cancel, Row::Stop, Row::Current];
                     rows.extend(
                         self.recent
                             .iter()
@@ -197,27 +226,27 @@ impl App {
                             .map(|&(p, t)| Row::Task(p, t)),
                     );
                     rows.push(Row::AllProjects);
-                    rows.push(Row::Close);
                     rows
                 }
-                None => vec![Row::AllProjects, Row::Close],
+                None => vec![Row::Close, Row::AllProjects],
             },
-            // the first row goes back while tracking, and offers "continue last" when idle
+            // the row after close goes back while tracking, and offers "continue last" when idle
             Screen::Projects => {
                 let first = match (&self.running, self.recent.first()) {
                     (Some(_), _) => Some(Row::Back),
                     (None, Some(&(p, t))) => Some(Row::Continue(p, t)),
                     (None, None) => None,
                 };
-                first
-                    .into_iter()
+                std::iter::once(Row::Close)
+                    .chain(first)
                     .chain((0..self.projects.len()).map(Row::Project))
-                    .chain([Row::NewProject, Row::Close])
+                    .chain(std::iter::once(Row::NewProject))
                     .collect()
             }
-            Screen::Tasks(p) => std::iter::once(Row::Back)
+            Screen::Tasks(p) => [Row::Close, Row::Back]
+                .into_iter()
                 .chain((0..self.projects[p].tasks.len()).map(|t| Row::Task(p, t)))
-                .chain([Row::NewTask(p), Row::Close])
+                .chain(std::iter::once(Row::NewTask(p)))
                 .collect(),
             Screen::Confirm => vec![Row::Keep, Row::Gap, Row::Gap, Row::Discard],
             Screen::Input(_) => vec![Row::Entry],
@@ -226,7 +255,7 @@ impl App {
 
     // the row of project p on the projects drum
     fn project_row(&self, p: usize) -> usize {
-        p + usize::from(self.running.is_some() || !self.recent.is_empty())
+        1 + p + usize::from(self.running.is_some() || !self.recent.is_empty())
     }
 
     fn say(&mut self, message: impl Into<String>) {
@@ -239,12 +268,12 @@ impl App {
         self.scroll = turn as f32;
     }
 
-    // the tracking drum on the running entry, else the projects drum on its first row
+    // the tracking drum on the running entry, else the projects drum on its first row after close
     fn go_home(&mut self) {
         if self.running.is_some() {
-            self.go(Screen::Home, 2);
+            self.go(Screen::Home, CURRENT);
         } else {
-            self.go(Screen::Projects, 0);
+            self.go(Screen::Projects, 1);
         }
     }
 
@@ -330,15 +359,15 @@ impl App {
             Screen::Tasks(_) => self.go(Screen::Projects, self.project_turn),
             // the projects drum is home while idle
             Screen::Projects if self.running.is_none() => {}
-            // back on the "+ new" row, the one above close
+            // back on the "+ new" row, the last one
             Screen::Input(Target::Project) => {
                 self.screen = Screen::Projects;
-                let new = self.rows().len() - 2;
+                let new = self.rows().len() - 1;
                 self.go(Screen::Projects, new);
             }
             Screen::Input(Target::Task(p)) => {
                 self.screen = Screen::Tasks(p);
-                let new = self.rows().len() - 2;
+                let new = self.rows().len() - 1;
                 self.go(Screen::Tasks(p), new);
             }
             _ => self.go_home(),
@@ -366,8 +395,9 @@ impl App {
                     }
                 };
                 self.project_turn = self.project_row(p);
-                // row 1 is the first task, or "+ new task" in a project without tasks
-                self.go(Screen::Tasks(p), 1);
+                // row 2, after close and back, is the first task, or "+ new task" in a project
+                // without tasks
+                self.go(Screen::Tasks(p), 2);
             }
             Screen::Input(Target::Task(p)) => {
                 let tasks = &mut self.projects[p].tasks;
@@ -404,7 +434,7 @@ impl App {
                 self.go_home();
             }
             Row::AllProjects => {
-                let turn = self.running.as_ref().map_or(0, |r| self.project_row(r.project));
+                let turn = self.running.as_ref().map_or(1, |r| self.project_row(r.project));
                 self.go(Screen::Projects, turn);
             }
             Row::NewProject => {
@@ -420,8 +450,9 @@ impl App {
             Row::Project(p) => {
                 self.project_turn = self.turn;
                 let turn = match &self.running {
-                    Some(r) if r.project == p => r.task + 1,
-                    _ => 1,
+                    // tasks start at row 2, after close and back
+                    Some(r) if r.project == p => r.task + 2,
+                    _ => 2,
                 };
                 self.go(Screen::Tasks(p), turn);
             }
@@ -483,7 +514,7 @@ impl App {
     fn tick(&mut self, dt: f32) {
         let idle = self.last_input.elapsed().as_secs_f32();
         match self.screen {
-            Screen::Home if self.running.is_some() && idle > SPRING_BACK => self.turn = 2,
+            Screen::Home if self.running.is_some() && idle > SPRING_BACK => self.turn = CURRENT,
             Screen::Confirm if idle > CONFIRM_IDLE => self.go_home(),
             _ => {}
         }
@@ -491,6 +522,74 @@ impl App {
         self.scroll += (self.turn as f32 - self.scroll) * ease;
         let band = if self.rows()[self.turn] == Row::Current { BAND_LIVE } else { BAND };
         self.band += (band - self.band) * ease;
+    }
+}
+
+// a row that does something to the drum or the entry, as opposed to a project or task to pick;
+// the confirm screen's rows are all actions and keep their own look
+fn is_action(row: Row) -> bool {
+    matches!(
+        row,
+        Row::Close | Row::Cancel | Row::Stop | Row::Back | Row::AllProjects | Row::NewProject | Row::NewTask(_)
+    )
+}
+
+// the colors of the left, center and right zones for the app's state
+fn led_colors(app: &App, visible: bool) -> [timebuzzer::Color; 3] {
+    let base = if app.running.is_some() { LED_TRACK } else { timebuzzer::Color::OFF };
+    match (visible, app.screen, &app.running) {
+        // timed from the last input, which opened the confirmation, so a pulse starts bright
+        (true, Screen::Confirm, _) => {
+            let t = app.last_input.elapsed().as_secs_f32() / LED_PULSE.as_secs_f32();
+            let level = (1.0 + (t * std::f32::consts::TAU).cos()) / 2.0;
+            [timebuzzer::Color::RED.dim(LED_PULSE_LOW + (LED_PULSE_HIGH - LED_PULSE_LOW) * level); 3]
+        }
+        (true, _, Some(_)) => [base, LED_OPEN, base],
+        (true, _, None) => [base, LED_IDLE_OPEN, base],
+        // hidden while tracking: a wave of green runs left to right, timed from the entry's start
+        (false, _, Some(r)) => {
+            let t = r.since.elapsed().as_secs_f32() / LED_WAVE.as_secs_f32();
+            [0.0, 1.0, 2.0].map(|zone| {
+                let phase = (t - zone / 3.0) * std::f32::consts::TAU;
+                let level = (1.0 - phase.cos()) / 2.0;
+                LED_WAVE_COLOR.dim(LED_WAVE_LOW + (LED_WAVE_HIGH - LED_WAVE_LOW) * level)
+            })
+        }
+        (false, _, None) => [base; 3],
+    }
+}
+
+// the knob's LEDs, written when the colors change; the device drops a message now and then, so
+// every zone is written again LED_RESEND after a change
+struct Lights {
+    leds: Option<timebuzzer::Leds>,
+    lit: Option<[timebuzzer::Color; 3]>,
+    // when the colors last changed, until the second write
+    changed_at: Option<Instant>,
+}
+
+impl Lights {
+    fn show(&mut self, colors: [timebuzzer::Color; 3]) {
+        let Some(leds) = &mut self.leds else { return };
+        let changed = self.lit != Some(colors);
+        let resend = self.changed_at.is_some_and(|t| t.elapsed() >= LED_RESEND);
+        if !changed && !resend {
+            return;
+        }
+        let zones = [timebuzzer::Zone::Left, timebuzzer::Zone::Center, timebuzzer::Zone::Right];
+        for (zone, color) in zones.into_iter().zip(colors) {
+            leds.set(zone, color);
+        }
+        self.lit = Some(colors);
+        self.changed_at = changed.then(Instant::now);
+    }
+
+    fn off(&mut self) {
+        if let Some(leds) = &mut self.leds {
+            leds.off();
+        }
+        self.lit = None;
+        self.changed_at = None;
     }
 }
 
@@ -517,6 +616,31 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 type Canvas<'a, 'b, 'c> = RaylibMode2D<'a, RaylibBlendMode<'b, RaylibDrawHandle<'c>>>;
+
+// the outline of rect in dashes of DASH with gaps of DASH_GAP, `thick` wide, inside the rect as
+// draw_rectangle_lines_ex draws it
+fn dashed(d: &mut Canvas, rect: Rectangle, thick: f32, color: Color) {
+    let edges = [
+        (rect.x, rect.y, rect.width, thick, true),
+        (rect.x, rect.y + rect.height - thick, rect.width, thick, true),
+        (rect.x, rect.y, thick, rect.height, false),
+        (rect.x + rect.width - thick, rect.y, thick, rect.height, false),
+    ];
+    for (x, y, w, h, across) in edges {
+        let len = if across { w } else { h };
+        let mut at = 0.0;
+        while at < len {
+            let dash = DASH.min(len - at);
+            let piece = if across {
+                Rectangle::new(x + at, y, dash, h)
+            } else {
+                Rectangle::new(x, y + at, w, dash)
+            };
+            d.draw_rectangle_rec(piece, color);
+            at += DASH + DASH_GAP;
+        }
+    }
+}
 
 fn main() {
     // the device calls back on midir's thread, so its events wait in a channel for the next frame;
@@ -611,17 +735,34 @@ fn main() {
     let mut command = String::new();
     let mut command_at = Instant::now();
     let hidden = WindowState::default().set_window_hidden(true);
+    let mut lights = Lights {
+        leds: _knob.as_ref().and_then(|_| timebuzzer::open_leds()),
+        lit: None,
+        changed_at: None,
+    };
+    // whatever an earlier run left lit
+    lights.off();
+    lights.show(led_colors(&app, visible));
 
-    while !rl.window_should_close() {
+    'frames: while !rl.window_should_close() {
         if !visible {
             // nothing is on screen, so draw no frames until the knob's button goes down; turns and
-            // the release of that press do nothing, because the knob's button never saw the press
+            // the release of that press do nothing, because the knob's button never saw the press.
+            // Between events the database is read again, for the LEDs
+            // While tracking, it wakes every LED_FRAME for the wave
+            let mut polled = Instant::now();
             loop {
-                match knob_rx.recv() {
+                let wait = if app.running.is_some() { LED_FRAME } else { HIDDEN_POLL };
+                match knob_rx.recv_timeout(wait) {
                     Ok(timebuzzer::Event::ClickDown) => break,
-                    Ok(_) => {}
-                    Err(_) => return,
+                    Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break 'frames,
                 }
+                if polled.elapsed() >= HIDDEN_POLL {
+                    app.reload();
+                    polled = Instant::now();
+                }
+                lights.show(led_colors(&app, false));
             }
             rl.clear_window_state(hidden);
             rl.set_window_focused();
@@ -700,6 +841,7 @@ fn main() {
             rl.set_window_state(hidden);
             macos::hide();
             visible = false;
+            lights.show(led_colors(&app, visible));
             // one empty frame before the wait for the knob: ending it polls the window's events,
             // and macOS takes the window off screen only when those are handled
             let mut d = rl.begin_drawing(&thread);
@@ -707,6 +849,7 @@ fn main() {
             continue;
         }
         app.tick(dt);
+        lights.show(led_colors(&app, visible));
 
         let measure = |s: &str, size: f32| font.measure_text(s, size, 0.0).x;
         let text = |d: &mut Canvas, s: &str, x: f32, y: f32, size: f32, color: Color| {
@@ -847,9 +990,14 @@ fn main() {
             _ => {}
         }
 
+        // an action in the band gets a dashed outline, a project or task a solid one
         let band = Rectangle::new(x0, BAND_Y - app.band / 2.0, x1 - x0, app.band);
         d.draw_rectangle_rec(band, GLOW);
-        d.draw_rectangle_lines_ex(band, point, DIM);
+        if is_action(rows[sel]) {
+            dashed(&mut d, band, point, DIM);
+        } else {
+            d.draw_rectangle_lines_ex(band, point, DIM);
+        }
         text(&mut d, ">", x0 + 6.0, BAND_Y - 8.0, 16.0, GREEN);
 
         // rows shrink and fade with their distance from the band
@@ -897,6 +1045,12 @@ fn main() {
                 Row::Entry => (format!("{}{blink}", app.entry), GREEN),
                 Row::Close => ("close".to_string(), GREEN),
             };
+            // actions sit back from the projects and tasks: dimmer and smaller until selected
+            let (size, color) = match (is_action(row), i == sel) {
+                (true, true) => (size * ACTION_SIZE, color),
+                (true, false) => (size * ACTION_SIZE, DIM),
+                (false, _) => (size, color),
+            };
             text(&mut d, &label, x, y - size / 2.0, size, fade(color, alpha));
 
             // the right side: the running time on the current row, details in the band
@@ -941,4 +1095,5 @@ fn main() {
             y += 3.0 * point;
         }
     }
+    lights.off();
 }

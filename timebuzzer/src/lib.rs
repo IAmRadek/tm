@@ -11,7 +11,9 @@ const CC_STEP: u8 = 0x51;
 const CC_CLICK: u8 = 0x52;
 
 // Minimum inter-message delay confirmed via hardware sweep (250µs < ok ≤ 500µs).
-const MSG_DELAY: Duration = Duration::from_micros(250);
+// At 250µs, changes that turn one channel off and another on (green to red) sometimes kept the
+// old channel lit or skipped a zone, so this uses the sweep's upper bound.
+const MSG_DELAY: Duration = Duration::from_micros(500);
 
 // ── LED zone layout ───────────────────────────────────────────────────────────
 //
