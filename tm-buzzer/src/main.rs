@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use raylib::prelude::*;
 
+mod jira;
 mod macos;
 mod store;
 
@@ -207,6 +208,9 @@ struct App {
     entry: String,
     // set by the close row; the main loop hides the window and clears it
     close: bool,
+    // the Jira search thread, None without jira.toml; issues holds its latest answer
+    jira: Option<jira::Watch>,
+    issues: Vec<jira::Task>,
 }
 
 impl App {
@@ -273,6 +277,24 @@ impl App {
             Err(e) => return self.fail("read", e),
         };
         self.projects = snapshot.projects;
+        self.take_issues();
+        // Jira issues tm has not seen yet go after the projects' own tasks, and a project only
+        // Jira knows goes after the projects; appending keeps the snapshot's indices valid
+        for issue in &self.issues {
+            let p = match self.projects.iter().position(|p| p.name == issue.project) {
+                Some(p) => p,
+                None => {
+                    self.projects.push(Project {
+                        name: issue.project.clone(),
+                        tasks: Vec::new(),
+                    });
+                    self.projects.len() - 1
+                }
+            };
+            if !self.projects[p].tasks.contains(&issue.key) {
+                self.projects[p].tasks.push(issue.key.clone());
+            }
+        }
         self.recent = snapshot.recent;
         self.logged = snapshot.logged;
         self.running = snapshot.running.map(|(project, task, started)| {
@@ -283,6 +305,17 @@ impl App {
                 since: Instant::now().checked_sub(elapsed).unwrap_or_else(Instant::now),
             }
         });
+    }
+
+    // keeps the newest Jira answer that arrived since the last call; true if one did
+    fn take_issues(&mut self) -> bool {
+        match self.jira.as_ref().and_then(jira::Watch::latest) {
+            Some(latest) => {
+                self.issues = latest;
+                true
+            }
+            None => false,
+        }
     }
 
     fn fail(&mut self, what: &str, e: impl std::fmt::Display) {
@@ -760,6 +793,8 @@ fn main() {
         flash: None,
         entry: String::new(),
         close: false,
+        jira: jira::watch(),
+        issues: Vec::new(),
     };
     app.reload();
     app.go_home();
@@ -801,6 +836,10 @@ fn main() {
             rl.set_window_focused();
             // tm's CLI may have changed the entries while the window was hidden
             app.reload();
+            // the answer lands a moment later, and the loop below reloads with it
+            if let Some(jira) = &app.jira {
+                jira.refresh();
+            }
             app.go_home();
             app.last_input = Instant::now();
             app.flash = None;
@@ -882,6 +921,11 @@ fn main() {
             d.clear_background(Color::BLANK);
             continue;
         }
+        // the window reloads only on writes, so a Jira answer that lands while it is open, such
+        // as the first search after launch, reloads here
+        if app.take_issues() {
+            app.reload();
+        }
         app.tick(dt);
         lights.show(led_colors(&app, visible));
 
@@ -911,6 +955,23 @@ fn main() {
         let running = app.running.as_ref();
         let current = running.map(|r| (r.project, r.task));
         let task_name = |p: usize, t: usize| app.projects[p].tasks[t].as_str();
+        // the Jira issue of a task named by an issue key
+        let issue = |p: usize, t: usize| {
+            app.issues
+                .iter()
+                .find(|i| i.project == app.projects[p].name && i.key == task_name(p, t))
+        };
+        // s cut to max wide, ending in "..." when it is cut
+        let fit = |s: &str, size: f32, max: f32| {
+            if measure(s, size) <= max {
+                return s.to_string();
+            }
+            let mut cut: String = s.to_string();
+            while !cut.is_empty() && measure(&format!("{cut}..."), size) > max {
+                cut.pop();
+            }
+            format!("{}...", cut.trim_end())
+        };
 
         let (next, command_color) = match app.screen {
             Screen::Projects if running.is_some() => ("switch".to_string(), GREEN),
@@ -1058,7 +1119,9 @@ fn main() {
             }
             let offset = far.min(1.0) * (BAND / 2.0 + ROW / 2.0) + (far - 1.0).max(0.0) * ROW;
             let y = BAND_Y + dist.signum() * offset;
-            let size = if far <= 1.0 { lerp(16.0, 22.0, far) } else { lerp(22.0, 16.0, far - 1.0) };
+            // largest in the band, smaller with every row away; 20 leaves room in the band for a
+            // Jira title under the key
+            let size = lerp(20.0, 14.0, (far / 3.0).min(1.0));
             let alpha = if far <= 1.0 { lerp(1.0, 0.65, far) } else { lerp(0.65, 0.0, (far - 1.0) / 2.2) };
             // the band's own details fade in as the row settles into it
             let settled = (1.0 - far * 2.0).max(0.0);
@@ -1089,13 +1152,10 @@ fn main() {
                 (true, false) => (size * ACTION_SIZE, DIM),
                 (false, _) => (size, color),
             };
-            text(&mut d, &label, x, y - size / 2.0, size, fade(color, alpha));
 
             // the right side of the band: details of the selected row
-            if i != sel || settled == 0.0 {
-                continue;
-            }
             let (top, bottom) = match (row, running) {
+                _ if i != sel || settled == 0.0 => (String::new(), String::new()),
                 (Row::Task(p, t), Some(r)) if (p, t) != (r.project, r.task) => {
                     ("switch".to_string(), format!("stops {}", clock(r.since.elapsed())))
                 }
@@ -1103,6 +1163,32 @@ fn main() {
                 (Row::Entry, _) => (String::new(), "enter: save".to_string()),
                 _ => (String::new(), String::new()),
             };
+
+            // a Jira task carries its assignee after the key and its title under it, both smaller,
+            // each cut to the room it has
+            match row {
+                Row::Task(p, t) if let Some(issue) = issue(p, t) => {
+                    let small = (size * 0.55).max(9.0);
+                    let has_title = !issue.summary.is_empty();
+                    let key_y = if has_title { y - (size + small) / 2.0 } else { y - size / 2.0 };
+                    text(&mut d, &label, x, key_y, size, fade(color, alpha));
+                    let end = x1 - 12.0;
+                    if let Some(name) = &issue.assignee {
+                        // on the key's lower part, as a suffix to it
+                        let after = x + measure(&label, size);
+                        let room = if top.is_empty() { end } else { end - measure(&top, 12.0) - 8.0 };
+                        let name = fit(&format!(" . @{name}"), small, room - after);
+                        text(&mut d, &name, after, key_y + (size - small) * 0.75, small, fade(DIM, alpha));
+                    }
+                    if has_title {
+                        let reserve = if bottom.is_empty() { 0.0 } else { measure(&bottom, 11.0) + 8.0 };
+                        let title = fit(&issue.summary, small, end - reserve - x);
+                        text(&mut d, &title, x, key_y + size, small, fade(DIM, alpha));
+                    }
+                }
+                _ => text(&mut d, &label, x, y - size / 2.0, size, fade(color, alpha)),
+            }
+
             right(&mut d, &top, x1 - 12.0, y - 14.0, 12.0, fade(GREEN, settled));
             right(&mut d, &bottom, x1 - 12.0, y + 2.0, 11.0, fade(DIM, settled));
         }

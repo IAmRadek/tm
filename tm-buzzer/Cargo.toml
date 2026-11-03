@@ -8,3 +8,7 @@ raylib = { version = "6.0.0" }
 timebuzzer = { path = "../timebuzzer" }
 rusqlite = { version = "0.35", features = ["bundled"] }
 chrono = "0.4"
+ureq = { version = "3.5.0", features = ["json", "platform-verifier"] }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
