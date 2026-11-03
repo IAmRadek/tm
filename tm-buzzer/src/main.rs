@@ -39,6 +39,8 @@ const LONG_SHOW: f64 = 0.15;
 const CONFIRM_IDLE: f32 = 4.0;
 // the window hides after this long without input; typing counts as input
 const CLOSE_IDLE: Duration = Duration::from_secs(12);
+// the header rule counts down an idle timeout in this many dashes
+const IDLE_DASHES: usize = 12;
 
 const ROW: f32 = 38.0;
 const BAND: f32 = 32.0;
@@ -1068,6 +1070,23 @@ fn main() {
         text(&mut d, &typing, 14.0 + measure(&prompt, 12.0), 12.0, 12.0, command_color);
         right(&mut d, &status, W - 14.0, 12.0, 12.0, DIM);
         d.draw_line_ex(Vector2::new(0.0, RULE_Y), Vector2::new(W, RULE_Y), point, fade(DIM, 0.5));
+        // the rule's dashes count down the idle time before the window closes, each fading out in
+        // its share of it, from the right; on the confirm screen they count down its own
+        // timeout, in red
+        let idle = app.last_input.elapsed().as_secs_f32();
+        let (timeout, color) = match app.screen {
+            Screen::Confirm => (CONFIRM_IDLE, DANGER),
+            _ => (CLOSE_IDLE.as_secs_f32(), GREEN),
+        };
+        // how many dashes' worth of time is left, e.g. 6.5 lights six and half of the seventh
+        let left = (1.0 - idle / timeout).max(0.0) * IDLE_DASHES as f32;
+        let step = W / IDLE_DASHES as f32;
+        for k in 0..IDLE_DASHES {
+            let alpha = (left - k as f32).clamp(0.0, 1.0);
+            let x = k as f32 * step + DASH_GAP / 2.0;
+            let dash = Rectangle::new(x, RULE_Y - point, step - DASH_GAP, 2.0 * point);
+            d.draw_rectangle_rec(dash, fade(color, 0.8 * alpha));
+        }
 
         // the strip: the running entry as project / task and its timer, on every screen
         let strip_y = RULE_Y + STRIP / 2.0;
