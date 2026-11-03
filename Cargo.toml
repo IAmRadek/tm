@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "tm-daemon"]
+members = [".", "tm-daemon", "timebuzzer", "tm-buzzer"]
 resolver = "2"
 
 [package]
