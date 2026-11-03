@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use raylib::prelude::*;
 
+mod config;
 mod jira;
 mod macos;
 mod store;
@@ -211,6 +212,9 @@ struct App {
     // the Jira search thread, None without jira.toml; issues holds its latest answer
     jira: Option<jira::Watch>,
     issues: Vec<jira::Task>,
+    // project and task names the drums skip; projects keeps them, so the running entry and its
+    // indices stay valid and the strip still shows it
+    ignore: Vec<String>,
 }
 
 impl App {
@@ -226,13 +230,13 @@ impl App {
                 };
                 std::iter::once(Row::Close)
                     .chain(actions)
-                    .chain((0..self.projects.len()).map(Row::Project))
+                    .chain(self.shown_projects().into_iter().map(Row::Project))
                     .chain(std::iter::once(Row::NewProject))
                     .collect()
             }
             Screen::Tasks(p) => [Row::Close, Row::Back]
                 .into_iter()
-                .chain((0..self.projects[p].tasks.len()).map(|t| Row::Task(p, t)))
+                .chain(self.shown_tasks(p).into_iter().map(|t| Row::Task(p, t)))
                 .chain(std::iter::once(Row::NewTask(p)))
                 .collect(),
             Screen::Confirm => vec![Row::Keep, Row::Gap, Row::Gap, Row::Discard],
@@ -240,14 +244,38 @@ impl App {
         }
     }
 
-    // the row of project p on the projects drum
-    fn project_row(&self, p: usize) -> usize {
+    fn ignored(&self, name: &str) -> bool {
+        self.ignore.iter().any(|i| i == name)
+    }
+
+    // the projects the drum shows, as indices into projects
+    fn shown_projects(&self) -> Vec<usize> {
+        (0..self.projects.len())
+            .filter(|&p| !self.ignored(&self.projects[p].name))
+            .collect()
+    }
+
+    // the tasks of project p the drum shows, as indices into its tasks
+    fn shown_tasks(&self, p: usize) -> Vec<usize> {
+        (0..self.projects[p].tasks.len())
+            .filter(|&t| !self.ignored(&self.projects[p].tasks[t]))
+            .collect()
+    }
+
+    // the row of project p on the projects drum; None when it is ignored
+    fn project_row(&self, p: usize) -> Option<usize> {
         let actions = match (&self.running, self.recent.is_empty()) {
             (Some(_), _) => 2,
             (None, false) => 1,
             (None, true) => 0,
         };
-        1 + actions + p
+        let at = self.shown_projects().iter().position(|&q| q == p)?;
+        Some(1 + actions + at)
+    }
+
+    // the row of task t on project p's drum, after close and back; None when it is ignored
+    fn task_row(&self, p: usize, t: usize) -> Option<usize> {
+        Some(2 + self.shown_tasks(p).iter().position(|&u| u == t)?)
     }
 
     fn say(&mut self, message: impl Into<String>) {
@@ -260,10 +288,11 @@ impl App {
         self.scroll = turn as f32;
     }
 
-    // the projects drum, on the running project while tracking, else on the first row after close
+    // the projects drum, on the running project while tracking and shown, else on the first row
+    // after close
     fn go_home(&mut self) {
         let turn = match &self.running {
-            Some(r) => self.project_row(r.project),
+            Some(r) => self.project_row(r.project).unwrap_or(1),
             None => 1,
         };
         self.go(Screen::Projects, turn);
@@ -296,6 +325,12 @@ impl App {
             }
         }
         self.recent = snapshot.recent;
+        // continue, as a row and as a double press, offers only what the drums show
+        let recent = std::mem::take(&mut self.recent);
+        self.recent = recent
+            .into_iter()
+            .filter(|&(p, t)| !self.ignored(&self.projects[p].name) && !self.ignored(&self.projects[p].tasks[t]))
+            .collect();
         self.logged = snapshot.logged;
         self.running = snapshot.running.map(|(project, task, started)| {
             let elapsed = (Utc::now() - started).to_std().unwrap_or_default();
@@ -415,7 +450,7 @@ impl App {
                         self.projects.len() - 1
                     }
                 };
-                self.project_turn = self.project_row(p);
+                self.project_turn = self.project_row(p).unwrap_or(1);
                 // row 2, after close and back, is the first task, or "+ new task" in a project
                 // without tasks
                 self.go(Screen::Tasks(p), 2);
@@ -466,9 +501,9 @@ impl App {
             Row::Close => self.close = true,
             Row::Project(p) => {
                 self.project_turn = self.turn;
+                // tasks start at row 2, after close and back
                 let turn = match &self.running {
-                    // tasks start at row 2, after close and back
-                    Some(r) if r.project == p => r.task + 2,
+                    Some(r) if r.project == p => self.task_row(p, r.task).unwrap_or(2),
                     _ => 2,
                 };
                 self.go(Screen::Tasks(p), turn);
@@ -779,6 +814,7 @@ fn main() {
     let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
 
     let conn = store::open().expect("open tm's database read-only; run tm once to create it");
+    let config = config::load();
     let mut app = App {
         conn,
         projects: Vec::new(),
@@ -793,8 +829,9 @@ fn main() {
         flash: None,
         entry: String::new(),
         close: false,
-        jira: jira::watch(),
+        jira: config.jira.and_then(jira::watch),
         issues: Vec::new(),
+        ignore: config.ignore,
     };
     app.reload();
     app.go_home();
@@ -1061,9 +1098,9 @@ fn main() {
                 // the selected project's tasks, ghosted
                 match rows[sel] {
                     Row::Project(p) => {
-                        for (k, task) in app.projects[p].tasks.iter().take(7).enumerate() {
+                        for (k, t) in app.shown_tasks(p).into_iter().take(7).enumerate() {
                             let y = BAND_Y - 96.0 + k as f32 * 30.0;
-                            text(&mut d, task, 188.0, y, 14.0, fade(DIM, 0.6));
+                            text(&mut d, task_name(p, t), 188.0, y, 14.0, fade(DIM, 0.6));
                         }
                     }
                     Row::Continue(p, _) => {

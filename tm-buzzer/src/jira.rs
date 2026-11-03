@@ -1,8 +1,7 @@
 // Jira issues offered as extra tasks; the search follows git-pr's src/jira.rs.
-// ~/.config/tm/jira.toml lists tm projects, each with a JQL; every issue the JQL finds becomes a
-// task of that project, named by its key. tm sees only the names, so tm holds no Jira code.
-// The token comes from the environment variable that `token_env` names, never from the file.
-use std::path::PathBuf;
+// The [jira] part of buzzer.toml lists tm projects, each with a JQL; every issue the JQL finds
+// becomes a task of that project, named by its key. tm sees only the names, so tm holds no Jira
+// code. The token comes from the environment variable that `token_env` names, never from the file.
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -25,7 +24,7 @@ enum Kind {
 }
 
 #[derive(Deserialize)]
-struct Config {
+pub struct Config {
     // the Jira address, e.g. "https://company.atlassian.net"
     url: String,
     kind: Kind,
@@ -81,15 +80,9 @@ impl Watch {
     }
 }
 
-// the issues of every project, after each search; None when jira.toml is missing or unusable,
-// with the reason on stderr
-pub fn watch() -> Option<Watch> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let path = PathBuf::from(home).join(".config/tm/jira.toml");
-    let text = std::fs::read_to_string(&path).ok()?;
-    let config: Config = toml::from_str(&text)
-        .map_err(|e| eprintln!("jira: {}: {e}", path.display()))
-        .ok()?;
+// the issues of every project, after each search; None when the token is missing or the
+// configuration unusable, with the reason on stderr
+pub fn watch(config: Config) -> Option<Watch> {
     let client = Client::new(&config)
         .map_err(|e| eprintln!("jira: {e}"))
         .ok()?;
