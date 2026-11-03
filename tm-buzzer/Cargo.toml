@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 raylib = { version = "6.0.0" }
 timebuzzer = { path = "../timebuzzer" }
+rusqlite = { version = "0.35", features = ["bundled"] }
+chrono = "0.4"

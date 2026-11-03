@@ -4,20 +4,29 @@
 //   Left / Right     rotate one detent (row up / row down)
 //   Enter or Space   the knob's button: click, double click, long press
 //   Esc              quit
-// The data is in memory and fake; nothing reaches tm's database.
+// The drums show tm's database, read again each time the window shows and after each write;
+// start, stop and discard run the tm CLI, which writes it and tells tm-daemon.
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use raylib::prelude::*;
 
 mod macos;
+mod store;
+
+use chrono::Utc;
+use store::Project;
+
+// the tm CLI, found on PATH
+const TM: &str = "tm";
 
 // the layout is drawn on a W × H canvas and zoomed by SCALE into the window
 const W: f32 = 360.0;
 const H: f32 = 320.0;
 const SCALE: f32 = 2.0;
 // a second press inside this window makes a double click, so a click fires only after it
-const DOUBLE: f64 = 0.25;
+const DOUBLE: f64 = 0.18;
 const LONG: f64 = 0.6;
 // a press shorter than this shows no long-press progress
 const LONG_SHOW: f64 = 0.15;
@@ -102,11 +111,6 @@ impl Button {
     }
 }
 
-struct Project {
-    name: String,
-    tasks: Vec<String>,
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
     // the tracking drum; with nothing running the app opens on Projects
@@ -154,6 +158,8 @@ struct Running {
 }
 
 struct App {
+    // reads tm's database; writes go through the tm CLI
+    conn: rusqlite::Connection,
     projects: Vec<Project>,
     screen: Screen,
     // the row in the band
@@ -242,22 +248,77 @@ impl App {
         }
     }
 
-    fn stop(&mut self) {
-        if let Some(r) = self.running.take() {
-            self.logged += r.since.elapsed();
+    // replaces the projects, recent tasks, running entry and today's time with the database's;
+    // a project typed in but never started is dropped, because only starting a task saves it
+    fn reload(&mut self) {
+        let snapshot = match store::load(&self.conn) {
+            Ok(snapshot) => snapshot,
+            Err(e) => return self.fail("read", e),
+        };
+        self.projects = snapshot.projects;
+        self.recent = snapshot.recent;
+        self.logged = snapshot.logged;
+        self.running = snapshot.running.map(|(project, task, started)| {
+            let elapsed = (Utc::now() - started).to_std().unwrap_or_default();
+            Running {
+                project,
+                task,
+                since: Instant::now().checked_sub(elapsed).unwrap_or_else(Instant::now),
+            }
+        });
+    }
+
+    fn fail(&mut self, what: &str, e: impl std::fmt::Display) {
+        eprintln!("tm-buzzer: {what}: {e}");
+        self.say(format!("{what} failed"));
+    }
+
+    // runs the tm CLI, which writes the database and tells tm-daemon; tm prints its errors to
+    // stderr and can still exit 0, so any stderr output counts as a failure
+    fn tm(&mut self, what: &str, args: &[&str]) -> bool {
+        match Command::new(TM).args(args).output() {
+            Ok(out) if out.status.success() && out.stderr.is_empty() => true,
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                self.fail(what, format!("tm {}: {} {}", args.join(" "), out.status, stderr.trim()));
+                false
+            }
+            Err(e) => {
+                self.fail(what, format!("running {TM}: {e}"));
+                false
+            }
         }
     }
 
-    fn start(&mut self, project: usize, task: usize) {
-        self.stop();
-        self.recent.retain(|&t| t != (project, task));
-        self.recent.insert(0, (project, task));
-        self.recent.truncate(6);
-        self.running = Some(Running {
-            project,
-            task,
-            since: Instant::now(),
-        });
+    // the write methods below call tm, reload, and return whether the write worked; a failure
+    // shows its own message
+
+    fn stop(&mut self) -> bool {
+        let ok = self.tm("stop", &["stop"]);
+        self.reload();
+        ok
+    }
+
+    // deletes the running entry
+    fn discard(&mut self) -> bool {
+        let ok = self.tm("discard", &["cancel"]);
+        self.reload();
+        ok
+    }
+
+    // starts a task now; tm start refuses while an entry runs, so a switch stops it first and
+    // starts the new task at that stop time, which leaves no gap. If the start fails after the
+    // stop, nothing runs
+    fn start(&mut self, p: usize, t: usize) -> bool {
+        let project = self.projects[p].name.clone();
+        let task = self.projects[p].tasks[t].clone();
+        let ok = if self.running.is_some() {
+            self.tm("stop", &["stop"]) && self.tm("start", &["start", &project, &task, "--from-last-stop"])
+        } else {
+            self.tm("start", &["start", &project, &task])
+        };
+        self.reload();
+        ok
     }
 
     fn today(&self) -> Duration {
@@ -326,8 +387,9 @@ impl App {
     fn run(&mut self, row: Row) {
         match row {
             Row::Continue(p, t) => {
-                self.start(p, t);
-                self.say("continued");
+                if self.start(p, t) {
+                    self.say("continued");
+                }
                 self.go_home();
             }
             Row::Task(p, t) => {
@@ -335,8 +397,9 @@ impl App {
                     self.say("already tracking");
                 } else {
                     let switched = self.running.is_some();
-                    self.start(p, t);
-                    self.say(if switched { "switched" } else { "started" });
+                    if self.start(p, t) {
+                        self.say(if switched { "switched" } else { "started" });
+                    }
                 }
                 self.go_home();
             }
@@ -364,8 +427,9 @@ impl App {
             }
             Row::Back => self.back(),
             Row::Stop => {
-                self.stop();
-                self.say("stopped");
+                if self.stop() {
+                    self.say("stopped");
+                }
                 self.go_home();
             }
             Row::Cancel => self.go(Screen::Confirm, 0),
@@ -375,8 +439,9 @@ impl App {
                 self.go_home();
             }
             Row::Discard => {
-                self.running = None;
-                self.say("entry discarded");
+                if self.discard() {
+                    self.say("entry discarded");
+                }
                 self.go_home();
             }
         }
@@ -387,11 +452,13 @@ impl App {
         match (gesture, self.screen) {
             (Gesture::Double, _) => {
                 if self.running.is_some() {
-                    self.stop();
-                    self.say("stopped");
+                    if self.stop() {
+                        self.say("stopped");
+                    }
                 } else if let Some(&(p, t)) = self.recent.first() {
-                    self.start(p, t);
-                    self.say("continued");
+                    if self.start(p, t) {
+                        self.say("continued");
+                    }
                 } else {
                     self.say("nothing to continue");
                 }
@@ -420,27 +487,11 @@ impl App {
             Screen::Confirm if idle > CONFIRM_IDLE => self.go_home(),
             _ => {}
         }
-        let ease = 1.0 - (-25.0 * dt).exp();
+        let ease = 1.0 - (-40.0 * dt).exp();
         self.scroll += (self.turn as f32 - self.scroll) * ease;
         let band = if self.rows()[self.turn] == Row::Current { BAND_LIVE } else { BAND };
         self.band += (band - self.band) * ease;
     }
-}
-
-fn fake_projects() -> Vec<Project> {
-    let project = |name: &str, tasks: &[&str]| Project {
-        name: name.to_string(),
-        tasks: tasks.iter().map(|t| t.to_string()).collect(),
-    };
-    vec![
-        project("atlas", &["api-review", "code-review", "migrations", "planning"]),
-        project("hearth", &["planning", "standup", "incident-4012"]),
-        project("admin", &["email", "invoices"]),
-        Project {
-            name: "inbox".to_string(),
-            tasks: (101..135).map(|n| format!("ticket-{n}")).collect(),
-        },
-    ]
 }
 
 fn clock(d: Duration) -> String {
@@ -533,21 +584,25 @@ fn main() {
         });
     let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
 
+    let conn = store::open().expect("open tm's database read-only; run tm once to create it");
     let mut app = App {
-        projects: fake_projects(),
+        conn,
+        projects: Vec::new(),
         screen: Screen::Projects,
         turn: 0,
         scroll: 0.0,
         band: BAND,
         project_turn: 1,
         running: None,
-        recent: vec![(0, 0), (0, 1), (1, 0), (2, 0)],
-        logged: Duration::from_secs(4 * 3600 + 38 * 60),
+        recent: Vec::new(),
+        logged: Duration::ZERO,
         last_input: Instant::now(),
         flash: None,
         entry: String::new(),
         close: false,
     };
+    app.reload();
+    app.go_home();
     let mut button = Button::default();
     // the knob's button has its own state, so a key and the knob never make one gesture together
     let mut knob = Button::default();
@@ -570,6 +625,8 @@ fn main() {
             }
             rl.clear_window_state(hidden);
             rl.set_window_focused();
+            // tm's CLI may have changed the entries while the window was hidden
+            app.reload();
             app.go_home();
             app.last_input = Instant::now();
             app.flash = None;
@@ -643,6 +700,10 @@ fn main() {
             rl.set_window_state(hidden);
             macos::hide();
             visible = false;
+            // one empty frame before the wait for the knob: ending it polls the window's events,
+            // and macOS takes the window off screen only when those are handled
+            let mut d = rl.begin_drawing(&thread);
+            d.clear_background(Color::BLANK);
             continue;
         }
         app.tick(dt);
