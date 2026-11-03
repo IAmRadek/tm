@@ -18,8 +18,11 @@ mod store;
 use chrono::Utc;
 use store::Project;
 
-// the tm CLI, found on PATH
-const TM: &str = "tm";
+// the tm CLI: the path TM_BIN held at build time, as the Nix package sets it, else tm on PATH
+const TM: &str = match option_env!("TM_BIN") {
+    Some(path) => path,
+    None => "tm",
+};
 
 // the layout is drawn on a W × H canvas and zoomed by SCALE into the window
 const W: f32 = 360.0;

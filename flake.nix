@@ -26,6 +26,24 @@
               --zsh <($out/bin/tm completions zsh)
           '';
         };
+
+      # The timebuzzer knob's window; Darwin only, because src/macos.rs calls AppKit.
+      # It runs tm for every write, at the store path baked in through TM_BIN, so it needs no PATH.
+      mkBuzzer = pkgs: tm:
+        pkgs.rustPlatform.buildRustPackage {
+          pname = "tm-buzzer";
+          inherit version;
+          src = self;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "--package" "tm-buzzer" ];
+          cargoTestFlags = [ "--package" "tm-buzzer" ];
+          # raylib-sys builds raylib with cmake and generates bindings with bindgen
+          nativeBuildInputs = [ pkgs.cmake pkgs.rustPlatform.bindgenHook ];
+          # cmake is for raylib-sys's build script, not for this crate
+          dontUseCmakeConfigure = true;
+          env.TM_BIN = "${tm}/bin/tm";
+          meta.mainProgram = "tm-buzzer";
+        };
     in {
       packages = forAllSystems (pkgs:
         let tm = mkPackage pkgs "tm";
@@ -34,6 +52,7 @@
           default = tm;
         } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
           tm-daemon = mkPackage pkgs "tm-daemon";
+          tm-buzzer = mkBuzzer pkgs tm;
         });
 
       checks = forAllSystems (pkgs: self.packages.${pkgs.stdenv.hostPlatform.system});
@@ -48,6 +67,7 @@
       overlays.default = final: prev: {
         tm = mkPackage final "tm";
         tm-daemon = mkPackage final "tm-daemon";
+        tm-buzzer = mkBuzzer final final.tm;
       };
 
       darwinModules.default = { config, lib, pkgs, ... }:
