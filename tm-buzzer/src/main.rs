@@ -73,6 +73,8 @@ const LED_WAVE: Duration = Duration::from_secs(3);
 const LED_WAVE_LOW: f32 = 0.1;
 const LED_WAVE_HIGH: f32 = 1.0;
 const LED_FRAME: Duration = Duration::from_millis(50);
+// how often the app looks for the knob being plugged in or out
+const KNOB_CHECK: Duration = Duration::from_secs(2);
 // how often the hidden app reads the database, so the LEDs follow tm's CLI
 const HIDDEN_POLL: Duration = Duration::from_secs(2);
 
@@ -568,6 +570,56 @@ impl Lights {
     }
 }
 
+// the knob, which comes and goes with the dock it hangs on; its events go to tx
+struct Knob {
+    tx: mpsc::Sender<timebuzzer::Event>,
+    input: Option<timebuzzer::Input>,
+    checked: Instant,
+}
+
+impl Knob {
+    fn connect(&mut self, lights: &mut Lights) {
+        let tx = self.tx.clone();
+        self.input = timebuzzer::listen(move |event| {
+            let _ = tx.send(event);
+        });
+        lights.leds = self.input.as_ref().and_then(|_| timebuzzer::open_leds());
+        // a device plugged in again has lost what it showed, so every zone is written
+        lights.lit = None;
+        lights.changed_at = None;
+    }
+
+    fn present(&self) -> bool {
+        self.input.is_some()
+    }
+
+    // every KNOB_CHECK, opens the knob when it appears and drops it when it goes; midir reports
+    // neither, and a connection to an unplugged device stays open but silent. Returns whether
+    // the knob went away in this call
+    fn check(&mut self, lights: &mut Lights) -> bool {
+        if self.checked.elapsed() < KNOB_CHECK {
+            return false;
+        }
+        self.checked = Instant::now();
+        match (timebuzzer::connected(), self.present()) {
+            (true, false) => {
+                self.connect(lights);
+                if self.present() {
+                    eprintln!("tm-buzzer: timebuzzer connected");
+                }
+            }
+            (false, true) => {
+                self.input = None;
+                lights.leds = None;
+                eprintln!("tm-buzzer: timebuzzer disconnected");
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+}
+
 fn clock(d: Duration) -> String {
     let s = d.as_secs();
     format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
@@ -618,17 +670,24 @@ fn dashed(d: &mut Canvas, rect: Rectangle, thick: f32, color: Color) {
 }
 
 fn main() {
-    // the device calls back on midir's thread, so its events wait in a channel for the next frame;
-    // the connection lives as long as `_knob`
+    // the device calls back on midir's thread, so its events wait in a channel for the next frame
     let (knob_tx, knob_rx) = mpsc::channel();
-    let _knob = timebuzzer::listen(move |event| {
-        let _ = knob_tx.send(event);
-    });
-    if _knob.is_none() {
-        eprintln!("tm-buzzer: no timebuzzer found, using the keyboard only");
+    let mut lights = Lights {
+        leds: None,
+        lit: None,
+        changed_at: None,
+    };
+    let mut device = Knob {
+        tx: knob_tx,
+        input: None,
+        checked: Instant::now(),
+    };
+    device.connect(&mut lights);
+    if !device.present() {
+        eprintln!("tm-buzzer: no timebuzzer found, using the keyboard until one is plugged in");
     }
     // with a knob the app starts hidden and waits for its button; without one it shows at once
-    let mut visible = _knob.is_none();
+    let mut visible = !device.present();
 
     let (window_w, window_h) = ((W * SCALE) as i32, (H * SCALE) as i32);
     let mut builder = raylib::init();
@@ -709,33 +768,30 @@ fn main() {
     let mut command = String::new();
     let mut command_at = Instant::now();
     let hidden = WindowState::default().set_window_hidden(true);
-    let mut lights = Lights {
-        leds: _knob.as_ref().and_then(|_| timebuzzer::open_leds()),
-        lit: None,
-        changed_at: None,
-    };
     // whatever an earlier run left lit
     lights.off();
     lights.show(led_colors(&app, visible));
 
-    'frames: while !rl.window_should_close() {
+    while !rl.window_should_close() {
         if !visible {
             // nothing is on screen, so draw no frames until the knob's button goes down; turns and
             // the release of that press do nothing, because the knob's button never saw the press.
             // Between events the database is read again, for the LEDs
-            // While tracking, it wakes every LED_FRAME for the wave
+            // It waits on the main run loop in LED_FRAME slices, so CoreMIDI can report the knob
+            // being plugged in, and looks at the knob's events between slices
             let mut polled = Instant::now();
-            loop {
-                let wait = if app.running.is_some() { LED_FRAME } else { HIDDEN_POLL };
-                match knob_rx.recv_timeout(wait) {
-                    Ok(timebuzzer::Event::ClickDown) => break,
-                    Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break 'frames,
+            'wait: loop {
+                for event in knob_rx.try_iter() {
+                    if event == timebuzzer::Event::ClickDown {
+                        break 'wait;
+                    }
                 }
+                macos::run_loop(LED_FRAME.as_secs_f64());
                 if polled.elapsed() >= HIDDEN_POLL {
                     app.reload();
                     polled = Instant::now();
                 }
+                device.check(&mut lights);
                 lights.show(led_colors(&app, false));
             }
             rl.clear_window_state(hidden);
@@ -806,16 +862,13 @@ fn main() {
         for g in gestures.drain(..) {
             app.apply(g);
         }
-        // without a knob nothing could show the window again, so it stays open
-        if _knob.is_some() && app.last_input.elapsed() >= CLOSE_IDLE {
+        // a hidden window waits for the knob, which may be plugged in again later; Esc quits.
+        // An unplugged knob closes the window with it
+        if device.check(&mut lights) || app.last_input.elapsed() >= CLOSE_IDLE {
             app.close = true;
         }
         if app.close {
             app.close = false;
-            // without a knob nothing could show the window again, so close quits
-            if _knob.is_none() {
-                break;
-            }
             rl.set_window_state(hidden);
             macos::hide();
             visible = false;

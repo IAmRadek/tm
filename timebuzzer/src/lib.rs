@@ -175,6 +175,17 @@ fn find_port<T: midir::MidiIO>(io: &T) -> Option<T::Port> {
     })
 }
 
+/// The connection `listen` returns; events stop when it is dropped.
+pub type Input = midir::MidiInputConnection<()>;
+
+/// Whether a timeBuzzer input port exists now. Each call asks CoreMIDI through a new client,
+/// so the answer follows a device plugged in or out since the last call.
+pub fn connected() -> bool {
+    MidiInput::new("tb-cap-watch")
+        .map(|input| find_port(&input).is_some())
+        .unwrap_or(false)
+}
+
 /// Open the timeBuzzer's LED output. Returns `None` if device is not connected.
 pub fn open_leds() -> Option<Leds> {
     let out = MidiOutput::new("tb-cap").ok()?;
@@ -184,7 +195,7 @@ pub fn open_leds() -> Option<Leds> {
 
 /// Open the timeBuzzer's input and call `callback` for every decoded event.
 /// Blocks until the returned connection is dropped.
-pub fn listen(callback: impl Fn(Event) + Send + 'static) -> Option<midir::MidiInputConnection<()>> {
+pub fn listen(callback: impl Fn(Event) + Send + 'static) -> Option<Input> {
     let mut input = MidiInput::new("tb-cap").ok()?;
     input.ignore(Ignore::None);
     let port = find_port(&input)?;

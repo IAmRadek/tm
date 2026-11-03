@@ -12,6 +12,18 @@ unsafe extern "C" {
     fn objc_msgSend();
 }
 
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    static kCFRunLoopDefaultMode: *const c_void;
+    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: u8) -> i32;
+}
+
+// runs the current thread's run loop for up to `seconds`, or until it handles one source. CoreMIDI
+// delivers device changes through the main run loop; without it a client keeps an old device list
+pub fn run_loop(seconds: f64) {
+    unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, 1) };
+}
+
 unsafe fn app() -> Id {
     let f: unsafe extern "C" fn(Id, Id) -> Id =
         unsafe { transmute(objc_msgSend as unsafe extern "C" fn()) };
