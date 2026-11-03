@@ -137,9 +137,14 @@ impl InputState {
         let (cc, val) = (msg[1], msg[2]);
         match cc {
             CC_POSITION => {
+                // the position stops at 0 and does not wrap: each further detent left sends 0
+                // again, so a repeated 0 is a turn left. A repeated 127 is taken as a turn right
+                // on the same pattern; no capture has reached 127 yet
                 let ev = match self.prev_pos {
                     Some(p) if val > p => Some(Event::Right),
                     Some(p) if val < p => Some(Event::Left),
+                    Some(0) if val == 0 => Some(Event::Left),
+                    Some(0x7F) if val == 0x7F => Some(Event::Right),
                     _ => None,
                 };
                 self.prev_pos = Some(val);

@@ -23,28 +23,27 @@ const TM: &str = "tm";
 
 // the layout is drawn on a W × H canvas and zoomed by SCALE into the window
 const W: f32 = 360.0;
-const H: f32 = 320.0;
+const H: f32 = 350.0;
 const SCALE: f32 = 2.0;
 // a second press inside this window makes a double click, so a click fires only after it
 const DOUBLE: f64 = 0.18;
 const LONG: f64 = 0.6;
 // a press shorter than this shows no long-press progress
 const LONG_SHOW: f64 = 0.15;
-// the drum springs back to the running entry after this long without input
-const SPRING_BACK: f32 = 5.0;
-// the cancel confirmation returns to tracking after this long without input
+// the cancel confirmation returns to the projects after this long without input
 const CONFIRM_IDLE: f32 = 4.0;
+// the window hides after this long without input; typing counts as input
+const CLOSE_IDLE: Duration = Duration::from_secs(12);
 
 const ROW: f32 = 38.0;
 const BAND: f32 = 32.0;
-// the band holding the running entry, tall enough for the timer
-const BAND_LIVE: f32 = 48.0;
-const BAND_Y: f32 = 166.0;
 const RULE_Y: f32 = 36.0;
+// the strip under the header that shows the running entry, and the rule below it
+const STRIP: f32 = 30.0;
+const STRIP_RULE_Y: f32 = RULE_Y + STRIP;
+const BAND_Y: f32 = 166.0 + STRIP;
 // the text size of an action row (close, stop, back, + new ...) against a project or task row
 const ACTION_SIZE: f32 = 0.85;
-// the running entry's row on the tracking drum, after close, cancel and stop
-const CURRENT: usize = 3;
 
 // whoami's terminal palette: phosphor green on near-black
 const PANEL: Color = Color::new(10, 12, 10, 255);
@@ -141,8 +140,7 @@ impl Button {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
-    // the tracking drum; with nothing running the app opens on Projects
-    Home,
+    // home, while tracking and while idle
     Projects,
     Tasks(usize),
     Confirm,
@@ -160,13 +158,10 @@ enum Target {
 enum Row {
     Continue(usize, usize),
     Task(usize, usize),
-    AllProjects,
     Project(usize),
     Back,
     Stop,
     Cancel,
-    // the running entry
-    Current,
     Keep,
     // an empty row that keeps discard a few deliberate detents away
     Gap,
@@ -194,8 +189,6 @@ struct App {
     turn: usize,
     // where the drum is drawn, easing toward turn
     scroll: f32,
-    // the band's height, easing between BAND and BAND_LIVE
-    band: f32,
     // the projects-drum turn, restored when going back from a task drum
     project_turn: usize,
     running: Option<Running>,
@@ -214,31 +207,16 @@ struct App {
 impl App {
     fn rows(&self) -> Vec<Row> {
         match self.screen {
-            Screen::Home => match &self.running {
-                Some(r) => {
-                    let current = (r.project, r.task);
-                    // close is the top row on every drum, one detent up from the default row
-                    let mut rows = vec![Row::Close, Row::Cancel, Row::Stop, Row::Current];
-                    rows.extend(
-                        self.recent
-                            .iter()
-                            .filter(|&&task| task != current)
-                            .map(|&(p, t)| Row::Task(p, t)),
-                    );
-                    rows.push(Row::AllProjects);
-                    rows
-                }
-                None => vec![Row::Close, Row::AllProjects],
-            },
-            // the row after close goes back while tracking, and offers "continue last" when idle
+            // close is the top row on every drum; then stop and cancel while tracking, or
+            // "continue last" when idle
             Screen::Projects => {
-                let first = match (&self.running, self.recent.first()) {
-                    (Some(_), _) => Some(Row::Back),
-                    (None, Some(&(p, t))) => Some(Row::Continue(p, t)),
-                    (None, None) => None,
+                let actions = match (&self.running, self.recent.first()) {
+                    (Some(_), _) => vec![Row::Stop, Row::Cancel],
+                    (None, Some(&(p, t))) => vec![Row::Continue(p, t)],
+                    (None, None) => Vec::new(),
                 };
                 std::iter::once(Row::Close)
-                    .chain(first)
+                    .chain(actions)
                     .chain((0..self.projects.len()).map(Row::Project))
                     .chain(std::iter::once(Row::NewProject))
                     .collect()
@@ -255,7 +233,12 @@ impl App {
 
     // the row of project p on the projects drum
     fn project_row(&self, p: usize) -> usize {
-        1 + p + usize::from(self.running.is_some() || !self.recent.is_empty())
+        let actions = match (&self.running, self.recent.is_empty()) {
+            (Some(_), _) => 2,
+            (None, false) => 1,
+            (None, true) => 0,
+        };
+        1 + actions + p
     }
 
     fn say(&mut self, message: impl Into<String>) {
@@ -268,13 +251,13 @@ impl App {
         self.scroll = turn as f32;
     }
 
-    // the tracking drum on the running entry, else the projects drum on its first row after close
+    // the projects drum, on the running project while tracking, else on the first row after close
     fn go_home(&mut self) {
-        if self.running.is_some() {
-            self.go(Screen::Home, CURRENT);
-        } else {
-            self.go(Screen::Projects, 1);
-        }
+        let turn = match &self.running {
+            Some(r) => self.project_row(r.project),
+            None => 1,
+        };
+        self.go(Screen::Projects, turn);
     }
 
     // replaces the projects, recent tasks, running entry and today's time with the database's;
@@ -357,8 +340,8 @@ impl App {
     fn back(&mut self) {
         match self.screen {
             Screen::Tasks(_) => self.go(Screen::Projects, self.project_turn),
-            // the projects drum is home while idle
-            Screen::Projects if self.running.is_none() => {}
+            // the projects drum is home
+            Screen::Projects => {}
             // back on the "+ new" row, the last one
             Screen::Input(Target::Project) => {
                 self.screen = Screen::Projects;
@@ -433,10 +416,6 @@ impl App {
                 }
                 self.go_home();
             }
-            Row::AllProjects => {
-                let turn = self.running.as_ref().map_or(1, |r| self.project_row(r.project));
-                self.go(Screen::Projects, turn);
-            }
             Row::NewProject => {
                 self.entry.clear();
                 self.go(Screen::Input(Target::Project), 0);
@@ -464,7 +443,6 @@ impl App {
                 self.go_home();
             }
             Row::Cancel => self.go(Screen::Confirm, 0),
-            Row::Current => {}
             Row::Keep | Row::Gap => {
                 self.say("kept");
                 self.go_home();
@@ -495,7 +473,8 @@ impl App {
                 }
                 self.go_home();
             }
-            (Gesture::Long, Screen::Home) => {
+            // on home, a long press asks to cancel the running entry
+            (Gesture::Long, Screen::Projects) => {
                 if self.running.is_some() {
                     self.go(Screen::Confirm, 0);
                 }
@@ -510,18 +489,14 @@ impl App {
         }
     }
 
-    // springs the drum back and closes the confirmation when the knob rests
+    // closes the confirmation when the knob rests, and eases the drum toward the turn
     fn tick(&mut self, dt: f32) {
         let idle = self.last_input.elapsed().as_secs_f32();
-        match self.screen {
-            Screen::Home if self.running.is_some() && idle > SPRING_BACK => self.turn = CURRENT,
-            Screen::Confirm if idle > CONFIRM_IDLE => self.go_home(),
-            _ => {}
+        if self.screen == Screen::Confirm && idle > CONFIRM_IDLE {
+            self.go_home();
         }
         let ease = 1.0 - (-40.0 * dt).exp();
         self.scroll += (self.turn as f32 - self.scroll) * ease;
-        let band = if self.rows()[self.turn] == Row::Current { BAND_LIVE } else { BAND };
-        self.band += (band - self.band) * ease;
     }
 }
 
@@ -530,7 +505,7 @@ impl App {
 fn is_action(row: Row) -> bool {
     matches!(
         row,
-        Row::Close | Row::Cancel | Row::Stop | Row::Back | Row::AllProjects | Row::NewProject | Row::NewTask(_)
+        Row::Close | Row::Cancel | Row::Stop | Row::Back | Row::NewProject | Row::NewTask(_)
     )
 }
 
@@ -715,7 +690,6 @@ fn main() {
         screen: Screen::Projects,
         turn: 0,
         scroll: 0.0,
-        band: BAND,
         project_turn: 1,
         running: None,
         recent: Vec::new(),
@@ -832,6 +806,10 @@ fn main() {
         for g in gestures.drain(..) {
             app.apply(g);
         }
+        // without a knob nothing could show the window again, so it stays open
+        if _knob.is_some() && app.last_input.elapsed() >= CLOSE_IDLE {
+            app.close = true;
+        }
         if app.close {
             app.close = false;
             // without a knob nothing could show the window again, so close quits
@@ -876,17 +854,10 @@ fn main() {
         let sel = app.turn;
         let running = app.running.as_ref();
         let current = running.map(|r| (r.project, r.task));
-        let current_row = rows.iter().position(|&r| r == Row::Current);
         let task_name = |p: usize, t: usize| app.projects[p].tasks[t].as_str();
 
         let (next, command_color) = match app.screen {
-            Screen::Home => match current_row {
-                Some(c) if sel > c => ("switch".to_string(), GREEN),
-                Some(c) if sel < c => ("actions".to_string(), GREEN),
-                Some(_) => (format!("track {}", app.projects[running.unwrap().project].name), GREEN),
-                None => ("idle".to_string(), GREEN),
-            },
-            Screen::Projects if running.is_some() => ("projects".to_string(), GREEN),
+            Screen::Projects if running.is_some() => ("switch".to_string(), GREEN),
             Screen::Projects => ("start".to_string(), GREEN),
             Screen::Tasks(p) => (format!("{}/tasks", app.projects[p].name), GREEN),
             Screen::Confirm => ("cancel entry?".to_string(), DANGER),
@@ -907,14 +878,10 @@ fn main() {
             _ => format!("today {}", hours(app.today())),
         };
         let hint = match app.screen {
-            Screen::Home => match current_row {
-                Some(c) if sel > c => "click: switch . 5s idle: spring back",
-                Some(_) => "up: actions . down: switch . hold: cancel",
-                None => "turn: move . click: select . 2x: continue",
-            },
-            Screen::Projects if running.is_some() => "click: open . hold: back",
+            Screen::Projects if running.is_some() => "click: open . 2x: stop . hold: cancel",
             Screen::Projects => "turn: move . click: open . 2x: continue",
-            Screen::Tasks(_) => "click: start . 2x: stop . hold: back",
+            Screen::Tasks(_) if running.is_some() => "click: switch . 2x: stop . hold: back",
+            Screen::Tasks(_) => "click: start . hold: back",
             Screen::Confirm => "click on discard cancels . hold: keep",
             Screen::Input(_) => "type a name . enter: save . esc: back",
         };
@@ -948,6 +915,24 @@ fn main() {
         right(&mut d, &status, W - 14.0, 12.0, 12.0, DIM);
         d.draw_line_ex(Vector2::new(0.0, RULE_Y), Vector2::new(W, RULE_Y), point, fade(DIM, 0.5));
 
+        // the strip: the running entry as project / task and its timer, on every screen
+        let strip_y = RULE_Y + STRIP / 2.0;
+        match running {
+            Some(r) => {
+                let project = format!("{} / ", app.projects[r.project].name);
+                text(&mut d, &project, 14.0, strip_y - 7.0, 14.0, DIM);
+                let task = task_name(r.project, r.task);
+                text(&mut d, task, 14.0 + measure(&project, 14.0), strip_y - 7.0, 14.0, GREEN);
+                // right-aligned on the advances timer draws with
+                let elapsed = clock(r.since.elapsed());
+                let digit = measure("0", 16.0);
+                let width: f32 = elapsed.chars().map(|ch| if ch == ':' { digit * 0.5 } else { digit }).sum();
+                timer(&mut d, &elapsed, W - 14.0 - width, strip_y - 8.0, 16.0, GREEN);
+            }
+            None => text(&mut d, "nothing running", 14.0, strip_y - 7.0, 14.0, fade(DIM, 0.6)),
+        }
+        d.draw_line_ex(Vector2::new(0.0, STRIP_RULE_Y), Vector2::new(W, STRIP_RULE_Y), point, fade(DIM, 0.5));
+
         // the column the drum turns in; the other side holds a preview or a tab
         let (x0, x1) = match app.screen {
             Screen::Projects => (8.0, 168.0),
@@ -969,6 +954,14 @@ fn main() {
                         text(&mut d, &app.projects[p].name, 188.0, BAND_Y + 2.0, 14.0, fade(DIM, 0.6));
                     }
                     Row::NewProject => text(&mut d, "type a name", 188.0, BAND_Y - 7.0, 14.0, fade(DIM, 0.6)),
+                    // what stop and cancel do to the running entry
+                    Row::Stop | Row::Cancel => {
+                        let r = running.unwrap();
+                        let (verb, color) = if rows[sel] == Row::Stop { ("logs", GREEN) } else { ("discards", DANGER) };
+                        let what = format!("{verb} {}", clock(r.since.elapsed()));
+                        text(&mut d, &what, 188.0, BAND_Y - 18.0, 14.0, color);
+                        text(&mut d, task_name(r.project, r.task), 188.0, BAND_Y + 2.0, 14.0, fade(DIM, 0.6));
+                    }
                     _ => {}
                 }
             }
@@ -979,7 +972,7 @@ fn main() {
                 text(&mut d, &app.projects[p].name, 16.0, BAND_Y - 7.0, 13.0, DIM);
                 // where the drum sits in the whole list
                 if n > 8 {
-                    let (top, bottom) = (RULE_Y + 16.0, H - 40.0);
+                    let (top, bottom) = (STRIP_RULE_Y + 16.0, H - 40.0);
                     for i in 0..n {
                         let y = top + (bottom - top) * i as f32 / (n - 1) as f32;
                         let (len, color) = if i == sel { (10.0, GREEN) } else { (4.0, DIM) };
@@ -991,7 +984,7 @@ fn main() {
         }
 
         // an action in the band gets a dashed outline, a project or task a solid one
-        let band = Rectangle::new(x0, BAND_Y - app.band / 2.0, x1 - x0, app.band);
+        let band = Rectangle::new(x0, BAND_Y - BAND / 2.0, x1 - x0, BAND);
         d.draw_rectangle_rec(band, GLOW);
         if is_action(rows[sel]) {
             dashed(&mut d, band, point, DIM);
@@ -1007,7 +1000,7 @@ fn main() {
             if far > 3.2 {
                 continue;
             }
-            let offset = far.min(1.0) * (app.band / 2.0 + ROW / 2.0) + (far - 1.0).max(0.0) * ROW;
+            let offset = far.min(1.0) * (BAND / 2.0 + ROW / 2.0) + (far - 1.0).max(0.0) * ROW;
             let y = BAND_Y + dist.signum() * offset;
             let size = if far <= 1.0 { lerp(16.0, 22.0, far) } else { lerp(22.0, 16.0, far - 1.0) };
             let alpha = if far <= 1.0 { lerp(1.0, 0.65, far) } else { lerp(0.65, 0.0, (far - 1.0) / 2.2) };
@@ -1015,19 +1008,9 @@ fn main() {
             let settled = (1.0 - far * 2.0).max(0.0);
             let x = x0 + 22.0;
 
-            if row == Row::Current && i == sel {
-                let r = running.unwrap();
-                text(&mut d, task_name(r.project, r.task), x, y - 21.0, 16.0, fade(GREEN, alpha));
-                timer(&mut d, &clock(r.since.elapsed()), x, y - 3.0, 24.0, fade(GREEN, alpha));
-                let project = &app.projects[r.project].name;
-                right(&mut d, project, x1 - 12.0, y - 19.0, 12.0, fade(DIM, settled));
-                continue;
-            }
-
             let mark = |p: usize, t: usize| if Some((p, t)) == current { " *" } else { "" };
             let (label, color) = match row {
                 Row::Continue(p, t) | Row::Task(p, t) => (format!("{}{}", task_name(p, t), mark(p, t)), GREEN),
-                Row::AllProjects => ("all projects >".to_string(), GREEN),
                 Row::Project(p) => {
                     let live = if current.is_some_and(|(cp, _)| cp == p) { " *" } else { "" };
                     (format!("{}{live}", app.projects[p].name), GREEN)
@@ -1036,7 +1019,6 @@ fn main() {
                 Row::Back => ("< back".to_string(), GREEN),
                 Row::Stop => ("[] stop".to_string(), GREEN),
                 Row::Cancel => ("x cancel".to_string(), GREEN),
-                Row::Current => (task_name(current.unwrap().0, current.unwrap().1).to_string(), GREEN),
                 Row::Keep => ("keep running".to_string(), GREEN),
                 Row::Gap => (".".to_string(), DIM),
                 Row::Discard => (format!("x discard {}", clock(running.unwrap().since.elapsed())), DANGER),
@@ -1053,19 +1035,14 @@ fn main() {
             };
             text(&mut d, &label, x, y - size / 2.0, size, fade(color, alpha));
 
-            // the right side: the running time on the current row, details in the band
-            if row == Row::Current {
-                let elapsed = clock(running.unwrap().since.elapsed());
-                right(&mut d, &elapsed, x1 - 12.0, y - 7.0, 14.0, fade(GREEN, alpha));
-            }
+            // the right side of the band: details of the selected row
             if i != sel || settled == 0.0 {
                 continue;
             }
-            let (top, bottom) = match (row, app.screen) {
-                (Row::Task(..), Screen::Home) if running.is_some() => {
-                    ("switch".to_string(), format!("stops {}", clock(running.unwrap().since.elapsed())))
+            let (top, bottom) = match (row, running) {
+                (Row::Task(p, t), Some(r)) if (p, t) != (r.project, r.task) => {
+                    ("switch".to_string(), format!("stops {}", clock(r.since.elapsed())))
                 }
-                (Row::Task(p, _), Screen::Home) => (String::new(), app.projects[p].name.clone()),
                 (Row::NewTask(_), _) => (String::new(), "keyboard".to_string()),
                 (Row::Entry, _) => (String::new(), "enter: save".to_string()),
                 _ => (String::new(), String::new()),
