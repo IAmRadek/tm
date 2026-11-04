@@ -6,6 +6,7 @@
 //   url = "https://company.atlassian.net"
 //   kind = "cloud"
 //   user = "me@example.com"
+//   token = "..."                       # keep the file private: chmod 600
 //
 //   [[jira.project]]
 //   name = "review"

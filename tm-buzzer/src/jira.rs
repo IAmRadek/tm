@@ -1,7 +1,7 @@
 // Jira issues offered as extra tasks; the search follows git-pr's src/jira.rs.
 // The [jira] part of buzzer.toml lists tm projects, each with a JQL; every issue the JQL finds
 // becomes a task of that project, named by its key. tm sees only the names, so tm holds no Jira
-// code. The token comes from the environment variable that `token_env` names, never from the file.
+// code. The token is in the file too, because a launchd agent gets no shell environment.
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -30,14 +30,10 @@ pub struct Config {
     kind: Kind,
     // the account email, Cloud only
     user: Option<String>,
-    #[serde(default = "token_env")]
-    token_env: String,
+    // the API token (Cloud) or the personal access token (Data Center)
+    token: String,
     #[serde(default)]
     project: Vec<Source>,
-}
-
-fn token_env() -> String {
-    "JIRA_TOKEN".to_string()
 }
 
 #[derive(Deserialize)]
@@ -127,10 +123,10 @@ pub fn watch(config: Config) -> Option<Watch> {
 
 impl Client {
     fn new(config: &Config) -> Result<Self, String> {
-        let token = std::env::var(&config.token_env)
-            .ok()
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| format!("set {}", config.token_env))?;
+        let token = &config.token;
+        if token.is_empty() {
+            return Err("set `token` in [jira]".to_string());
+        }
         let base = config.url.trim_end_matches('/');
         let (path, auth) = match config.kind {
             Kind::Cloud => {
