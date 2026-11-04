@@ -742,6 +742,21 @@ fn dashed(d: &mut Canvas, rect: Rectangle, thick: f32, color: Color) {
     }
 }
 
+// puts the window in the middle of the screen in use; positions are in points, from the top left
+// of the first screen, so a screen beside or above it has its own origin
+fn center(rl: &mut RaylibHandle, window_w: i32, window_h: i32) {
+    let (x, y, w, h) = macos::active_screen().unwrap_or_else(|| {
+        let monitor = get_current_monitor();
+        let origin = get_monitor_position(monitor);
+        let (w, h) = (get_monitor_width(monitor), get_monitor_height(monitor));
+        (origin.x as f64, origin.y as f64, w as f64, h as f64)
+    });
+    rl.set_window_position(
+        (x + (w - window_w as f64) / 2.0) as i32,
+        (y + (h - window_h as f64) / 2.0) as i32,
+    );
+}
+
 fn main() {
     // the device calls back on midir's thread, so its events wait in a channel for the next frame
     let (knob_tx, knob_rx) = mpsc::channel();
@@ -795,11 +810,7 @@ fn main() {
             raylib::ffi::RL_FUNC_ADD as i32,
         )
     };
-    let monitor = get_current_monitor();
-    rl.set_window_position(
-        (get_monitor_width(monitor) - window_w) / 2,
-        (get_monitor_height(monitor) - window_h) / 2,
-    );
+    center(&mut rl, window_w, window_h);
     // Doto, a dot-matrix font under the OFL (src/font/OFL.txt), built into the binary;
     // loaded large so the high-DPI framebuffer draws it sharp at every size used here
     let font = rl
@@ -871,6 +882,8 @@ fn main() {
                 device.check(&mut lights);
                 lights.show(led_colors(&app, false));
             }
+            // the screen in use may be another one than at the last show
+            center(&mut rl, window_w, window_h);
             rl.clear_window_state(hidden);
             rl.set_window_focused();
             // tm's CLI may have changed the entries while the window was hidden

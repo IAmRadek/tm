@@ -42,6 +42,51 @@ unsafe fn send(receiver: Id, selector: &CStr, arg: isize) {
     unsafe { f(receiver, sel_registerName(selector.as_ptr()), arg) }
 }
 
+unsafe fn get(receiver: Id, selector: &CStr) -> Id {
+    let f: unsafe extern "C" fn(Id, Id) -> Id =
+        unsafe { transmute(objc_msgSend as unsafe extern "C" fn()) };
+    unsafe { f(receiver, sel_registerName(selector.as_ptr())) }
+}
+
+#[repr(C)]
+struct NSRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+// arm64 returns an NSRect in registers through objc_msgSend; x86_64 would need objc_msgSend_stret
+#[cfg(target_arch = "aarch64")]
+unsafe fn frame(screen: Id) -> NSRect {
+    let f: unsafe extern "C" fn(Id, Id) -> NSRect =
+        unsafe { transmute(objc_msgSend as unsafe extern "C" fn()) };
+    unsafe { f(screen, sel_registerName(c"frame".as_ptr())) }
+}
+
+// the screen the user works on, the one with the active window and the menu bar focus, as
+// (x, y, width, height) in points. AppKit puts the origin at the bottom left of the first screen,
+// with y going up; this turns it to raylib's top left of the first screen, with y going down
+#[cfg(target_arch = "aarch64")]
+pub fn active_screen() -> Option<(f64, f64, f64, f64)> {
+    unsafe {
+        let class = objc_getClass(c"NSScreen".as_ptr());
+        let main = get(class, c"mainScreen");
+        let first = get(get(class, c"screens"), c"firstObject");
+        if main.is_null() || first.is_null() {
+            return None;
+        }
+        let (main, first) = (frame(main), frame(first));
+        Some((main.x, first.height - main.y - main.height, main.width, main.height))
+    }
+}
+
+// elsewhere the caller falls back to raylib's monitor of the window
+#[cfg(not(target_arch = "aarch64"))]
+pub fn active_screen() -> Option<(f64, f64, f64, f64)> {
+    None
+}
+
 // no Dock icon and no menu bar; call after raylib init, which sets the policy to regular
 pub fn set_accessory() {
     const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: isize = 1;
