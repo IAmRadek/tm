@@ -7,7 +7,9 @@ use std::time::Duration;
 
 const MIDI_CH: u8 = 0xBB;          // Control Change, channel 12
 const CC_POSITION: u8 = 0x50;
-const CC_STEP: u8 = 0x51;
+// the proximity sensor: 00 while a hand is near, 7F while none is, sent when it changes and
+// repeated with every heartbeat
+const CC_SENSOR: u8 = 0x51;
 const CC_CLICK: u8 = 0x52;
 
 // Minimum inter-message delay confirmed via hardware sweep (250µs < ok ≤ 500µs).
@@ -40,6 +42,10 @@ pub enum Event {
     ClickDown,
     /// Push button released.
     ClickUp,
+    /// A hand came near the knob (CC 0x51 went to 00).
+    Near,
+    /// The hand went away from the knob (CC 0x51 went to 7F).
+    Away,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,10 +133,12 @@ impl Leds {
 struct InputState {
     prev_pos: Option<u8>,
     click_down: bool,
+    // the sensor's last value; the first one sets it without an event
+    sensor: Option<u8>,
 }
 
 impl InputState {
-    fn new() -> Self { Self { prev_pos: None, click_down: false } }
+    fn new() -> Self { Self { prev_pos: None, click_down: false, sensor: None } }
 
     fn parse(&mut self, msg: &[u8]) -> Option<Event> {
         if msg.len() != 3 || msg[0] != MIDI_CH { return None; }
@@ -158,7 +166,19 @@ impl InputState {
                 self.click_down = false;
                 Some(Event::ClickUp)
             }
-            CC_CLICK | CC_STEP => None,
+            // the heartbeat repeats the value, so only a change is an event
+            CC_SENSOR => {
+                let prev = self.sensor.replace(val);
+                match (prev, val) {
+                    (Some(p), v) if p == v => None,
+                    (None, _) => None,
+                    // 00 is a hand over the knob, 7F none, as tried by hand
+                    (_, 0x00) => Some(Event::Near),
+                    (_, 0x7F) => Some(Event::Away),
+                    _ => None,
+                }
+            }
+            CC_CLICK => None,
             _ => None,
         }
     }

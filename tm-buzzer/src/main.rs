@@ -37,9 +37,12 @@ const LONG: f64 = 0.6;
 const LONG_SHOW: f64 = 0.15;
 // the cancel confirmation returns to the projects after this long without input
 const CONFIRM_IDLE: f32 = 4.0;
-// the window hides after this long without input; typing counts as input
-const CLOSE_IDLE: Duration = Duration::from_secs(12);
-// the header rule counts down an idle timeout in this many dashes
+// the window hides this long after the hand goes away from the knob, or after the last input
+// while the hand is away; typing counts as input
+const CLOSE_AWAY: Duration = Duration::from_secs(2);
+// an Away counts only when no Near follows it within this long
+const AWAY_SETTLE: Duration = Duration::from_secs(1);
+// the header rule counts down a timeout in this many dashes
 const IDLE_DASHES: usize = 12;
 
 const ROW: f32 = 38.0;
@@ -206,6 +209,8 @@ struct App {
     // time of today's stopped entries
     logged: Duration,
     last_input: Instant,
+    // when the hand went away from the knob; None while it is near or since the window opened
+    away: Option<Instant>,
     flash: Option<(String, Instant)>,
     // the name typed on the input screen
     entry: String,
@@ -406,6 +411,18 @@ impl App {
         };
         self.reload();
         ok
+    }
+
+    // seconds left before the window hides, None while the hand is near: CLOSE_AWAY after the
+    // hand stayed away for AWAY_SETTLE or after the last input, whichever came later, so typing
+    // keeps it open. A hand moving over the knob sends Away and Near within the settle time
+    fn closing(&self) -> Option<f32> {
+        let away = self.away?;
+        if away.elapsed() < AWAY_SETTLE {
+            return None;
+        }
+        let since = (away + AWAY_SETTLE).max(self.last_input);
+        Some(CLOSE_AWAY.as_secs_f32() - since.elapsed().as_secs_f32())
     }
 
     fn today(&self) -> Duration {
@@ -839,6 +856,7 @@ fn main() {
         recent: Vec::new(),
         logged: Duration::ZERO,
         last_input: Instant::now(),
+        away: None,
         flash: None,
         entry: String::new(),
         close: false,
@@ -862,15 +880,17 @@ fn main() {
 
     while !rl.window_should_close() {
         if !visible {
-            // nothing is on screen, so draw no frames until the knob's button goes down; turns and
-            // the release of that press do nothing, because the knob's button never saw the press.
+            // nothing is on screen, so draw no frames until the knob's button goes down or a hand
+            // comes near it; turns and the release of that press do nothing, because the knob's
+            // button never saw the press.
             // Between events the database is read again, for the LEDs
             // It waits on the main run loop in LED_FRAME slices, so CoreMIDI can report the knob
             // being plugged in, and looks at the knob's events between slices
             let mut polled = Instant::now();
             'wait: loop {
                 for event in knob_rx.try_iter() {
-                    if event == timebuzzer::Event::ClickDown {
+                    // a press, or a hand coming near the knob
+                    if matches!(event, timebuzzer::Event::ClickDown | timebuzzer::Event::Near) {
                         break 'wait;
                     }
                 }
@@ -894,6 +914,7 @@ fn main() {
             }
             app.go_home();
             app.last_input = Instant::now();
+            app.away = None;
             app.flash = None;
             // the header types its command out again
             command.clear();
@@ -950,6 +971,8 @@ fn main() {
                 timebuzzer::Event::Left => gestures.push(Gesture::Ccw),
                 timebuzzer::Event::ClickDown => knob.update(now, true, false, &mut gestures),
                 timebuzzer::Event::ClickUp => knob.update(now, false, true, &mut gestures),
+                timebuzzer::Event::Near => app.away = None,
+                timebuzzer::Event::Away => app.away = Some(Instant::now()),
             }
         }
         knob.update(now, false, false, &mut gestures);
@@ -958,7 +981,7 @@ fn main() {
         }
         // a hidden window waits for the knob, which may be plugged in again later. An unplugged
         // knob closes the window with it
-        if device.check(&mut lights) || app.last_input.elapsed() >= CLOSE_IDLE {
+        if device.check(&mut lights) || app.closing().is_some_and(|left| left <= 0.0) {
             app.close = true;
         }
         if app.close {
@@ -1083,16 +1106,19 @@ fn main() {
         text(&mut d, &typing, 14.0 + measure(&prompt, 12.0), 12.0, 12.0, command_color);
         right(&mut d, &status, W - 14.0, 12.0, 12.0, DIM);
         d.draw_line_ex(Vector2::new(0.0, RULE_Y), Vector2::new(W, RULE_Y), point, fade(DIM, 0.5));
-        // the rule's dashes count down the idle time before the window closes, each fading out in
-        // its share of it, from the right; on the confirm screen they count down its own
-        // timeout, in red
-        let idle = app.last_input.elapsed().as_secs_f32();
-        let (timeout, color) = match app.screen {
-            Screen::Confirm => (CONFIRM_IDLE, DANGER),
-            _ => (CLOSE_IDLE.as_secs_f32(), GREEN),
+        // the rule's dashes count down the time before the window closes once the hand is away,
+        // each fading out in its share of it, from the right; on the confirm screen they count
+        // down its own timeout, in red
+        let ((left, timeout), color) = match app.screen {
+            Screen::Confirm => {
+                let idle = app.last_input.elapsed().as_secs_f32();
+                ((CONFIRM_IDLE - idle, CONFIRM_IDLE), DANGER)
+            }
+            // no dashes while the hand is near
+            _ => ((app.closing().unwrap_or(0.0), CLOSE_AWAY.as_secs_f32()), GREEN),
         };
         // how many dashes' worth of time is left, e.g. 6.5 lights six and half of the seventh
-        let left = (1.0 - idle / timeout).max(0.0) * IDLE_DASHES as f32;
+        let left = (left / timeout).max(0.0) * IDLE_DASHES as f32;
         let step = W / IDLE_DASHES as f32;
         for k in 0..IDLE_DASHES {
             let alpha = (left - k as f32).clamp(0.0, 1.0);
