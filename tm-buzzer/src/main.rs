@@ -1377,6 +1377,7 @@ fn main() {
             }
             // the screen in use may be another one than at the last show
             center(&mut rl, window_w, window_h);
+            macos::unhide();
             rl.clear_window_state(hidden);
             rl.set_window_focused();
             // tm's CLI may have changed the entries while the window was hidden

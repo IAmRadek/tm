@@ -104,6 +104,12 @@ pub fn hide() {
     unsafe { send(app(), c"hide:", 0) }
 }
 
+// undoes hide; activating the app also unhides it, but macOS can refuse the activation, as after
+// a wake from sleep, and the app then stays hidden; 0 is a nil sender
+pub fn unhide() {
+    unsafe { send(app(), c"unhide:", 0) }
+}
+
 // shows the window on the active Space; by default it stays on the Space it was created on,
 // and activating the app switches to that Space
 //
