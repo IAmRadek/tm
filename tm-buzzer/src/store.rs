@@ -1,15 +1,13 @@
-// Reads tm's database for the drums on a read-only connection; writes go through the tm CLI.
-// The SQL here knows tm's schema (src/db.rs init_schema): projects, tasks and time_entries,
-// with times stored as UTC text in "%Y-%m-%d %H:%M:%S", which sorts in time order.
+// Reads tm's database for the drums and the timeline on a read-only connection; writes go
+// through the tm CLI. The SQL here knows tm's schema (src/db.rs init_schema): projects, tasks
+// and time_entries, with times stored as UTC text in "%Y-%m-%d %H:%M:%S", which sorts in time
+// order.
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
-use chrono::{DateTime, Local, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags, params};
 
-// tasks offered on the tracking drum, most recently started first
-const RECENT: usize = 6;
 const FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 pub struct Project {
@@ -20,12 +18,17 @@ pub struct Project {
 pub struct Snapshot {
     // projects and their tasks, most recently used first, then never-used ones by name
     pub projects: Vec<Project>,
-    // (project, task) indices into projects, most recently started first
-    pub recent: Vec<(usize, usize)>,
-    // the running entry as indices into projects, and when it started
-    pub running: Option<(usize, usize, DateTime<Utc>)>,
-    // time of the stopped entries that started today, local time
-    pub logged: Duration,
+}
+
+// one time entry, as the timeline shows it; tm writes times to the second
+pub struct Entry {
+    // tm's entry id, the one tm amend takes
+    pub id: String,
+    pub project: String,
+    pub task: String,
+    pub start: DateTime<Utc>,
+    // None while it runs
+    pub stop: Option<DateTime<Utc>>,
 }
 
 // tm's database file, the path tm::db opens; read-only, so a missing file is an error
@@ -87,83 +90,48 @@ pub fn load(conn: &Connection) -> rusqlite::Result<Snapshot> {
             }
         })
         .collect();
-    let find = |project: &str, task: &str| {
-        let p = projects.iter().position(|p| p.name == project)?;
-        let t = projects[p].tasks.iter().position(|t| t == task)?;
-        Some((p, t))
-    };
+    Ok(Snapshot { projects })
+}
 
+// the entries that overlap from..to, in start order; a running one overlaps every span after its
+// start. tm does not keep entries apart, so two of them can overlap each other. A row whose time
+// does not parse is left out
+pub fn entries(conn: &Connection, from: DateTime<Utc>, to: DateTime<Utc>) -> rusqlite::Result<Vec<Entry>> {
     let mut stmt = conn.prepare(
         "
-        SELECT p.name, t.name
+        SELECT te.id, p.name, t.name, te.started_at, te.stopped_at
         FROM time_entries te
         JOIN tasks t ON te.task_id = t.id
         JOIN projects p ON t.project_id = p.id
-        GROUP BY t.id
-        ORDER BY MAX(te.started_at) DESC
-        LIMIT ?1
+        WHERE te.started_at < ?2 AND (te.stopped_at IS NULL OR te.stopped_at > ?1)
+        ORDER BY te.started_at, te.id
         ",
     )?;
-    let recent = stmt
-        .query_map(params![RECENT as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .iter()
-        .filter_map(|(project, task)| find(project, task))
-        .collect();
-
-    let running = conn
-        .query_row(
-            "
-            SELECT p.name, t.name, te.started_at
-            FROM time_entries te
-            JOIN tasks t ON te.task_id = t.id
-            JOIN projects p ON t.project_id = p.id
-            WHERE te.stopped_at IS NULL
-            LIMIT 1
-            ",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
+    let rows = stmt.query_map(
+        params![from.format(FORMAT).to_string(), to.format(FORMAT).to_string()],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        },
+    )?;
+    let parse = |s: &str| NaiveDateTime::parse_from_str(s, FORMAT).ok().map(|t| t.and_utc());
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, project, task, start, stop) = row?;
+        let Some(start) = parse(&start) else { continue };
+        let stop = match stop {
+            Some(stop) => match parse(&stop) {
+                Some(stop) => Some(stop),
+                None => continue,
             },
-        )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            e => Err(e),
-        })?
-        .and_then(|(project, task, started)| {
-            let (p, t) = find(&project, &task)?;
-            let started = NaiveDateTime::parse_from_str(&started, FORMAT).ok()?.and_utc();
-            Some((p, t, started))
-        });
-
-    // an entry that crossed midnight counts whole on the day it started
-    let midnight = Local::now()
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .and_then(|m| m.and_local_timezone(Local).earliest())
-        .map(|m| m.with_timezone(&Utc).format(FORMAT).to_string())
-        .unwrap_or_default();
-    let seconds: i64 = conn.query_row(
-        "
-        SELECT COALESCE(SUM(strftime('%s', stopped_at) - strftime('%s', started_at)), 0)
-        FROM time_entries
-        WHERE stopped_at IS NOT NULL AND started_at >= ?1
-        ",
-        params![midnight],
-        |row| row.get(0),
-    )?;
-
-    Ok(Snapshot {
-        projects,
-        recent,
-        running,
-        logged: Duration::from_secs(seconds.max(0) as u64),
-    })
+            None => None,
+        };
+        out.push(Entry { id, project, task, start, stop });
+    }
+    Ok(out)
 }

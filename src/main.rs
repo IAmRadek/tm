@@ -54,6 +54,12 @@ enum Commands {
         /// Override the stop timestamp. Accepts HH:MM, HH:MM:SS, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS, or RFC3339
         #[arg(long)]
         stopped_at: Option<String>,
+        /// Move the entry to this project, keeping its task name unless --task is given
+        #[arg(long)]
+        project: Option<String>,
+        /// Move the entry to this task, in its project unless --project is given
+        #[arg(long)]
+        task: Option<String>,
     },
     /// Stop the currently active time entry
     Stop {
@@ -257,9 +263,18 @@ fn cmd_start(
     });
 }
 
-fn cmd_amend(db: &Database, id: &str, started_at: Option<&str>, stopped_at: Option<&str>) {
-    if started_at.is_none() && stopped_at.is_none() {
-        return eprintln!("Nothing to amend. Provide --started-at and/or --stopped-at.");
+fn cmd_amend(
+    db: &Database,
+    id: &str,
+    started_at: Option<&str>,
+    stopped_at: Option<&str>,
+    project: Option<&str>,
+    task: Option<&str>,
+) {
+    if started_at.is_none() && stopped_at.is_none() && project.is_none() && task.is_none() {
+        return eprintln!(
+            "Nothing to amend. Provide --started-at, --stopped-at, --project and/or --task."
+        );
     }
 
     let started_at = match started_at {
@@ -278,8 +293,39 @@ fn cmd_amend(db: &Database, id: &str, started_at: Option<&str>, stopped_at: Opti
         None => None,
     };
 
-    match db.amend_time_entry(id, started_at, stopped_at) {
-        Ok(_) => println!("Amended entry {}.", id),
+    // the task the entry moves to: the named project and task, each defaulting to the entry's own
+    let moved = if project.is_some() || task.is_some() {
+        let (current_project, current_task) = match db.get_entry_names(id) {
+            Ok(names) => names,
+            Err(DbError::EntryNotFound) => return eprintln!("Time entry {} not found.", id),
+            Err(e) => return eprintln!("Error reading time entry: {}", e),
+        };
+        let project = project.unwrap_or(&current_project);
+        let task = task.unwrap_or(&current_task);
+        let proj = match db.get_or_create_project(project) {
+            Ok(p) => p,
+            Err(e) => return eprintln!("Error creating project: {}", e),
+        };
+        match db.get_or_create_task(proj.id, task) {
+            Ok(t) => Some((t.id, project.to_string(), task.to_string())),
+            Err(e) => return eprintln!("Error creating task: {}", e),
+        }
+    } else {
+        None
+    };
+
+    match db.amend_time_entry(id, started_at, stopped_at, moved.as_ref().map(|(t, _, _)| *t)) {
+        Ok(entry) => {
+            // the daemon shows the running entry's names, so it hears of a move
+            if let (Some((_, project, task)), None) = (moved, entry.stopped_at) {
+                notify_daemon(&DaemonMessage::Started {
+                    project,
+                    task,
+                    started_at: entry.started_at,
+                });
+            }
+            println!("Amended entry {}.", id)
+        }
         Err(DbError::EntryNotFound) => eprintln!("Time entry {} not found.", id),
         Err(DbError::InvalidTimeRange) => {
             eprintln!("Invalid time range: --stopped-at must be after --started-at.")
@@ -1435,7 +1481,16 @@ fn main() {
             id,
             started_at,
             stopped_at,
-        } => cmd_amend(&db, &id, started_at.as_deref(), stopped_at.as_deref()),
+            project,
+            task,
+        } => cmd_amend(
+            &db,
+            &id,
+            started_at.as_deref(),
+            stopped_at.as_deref(),
+            project.as_deref(),
+            task.as_deref(),
+        ),
         Commands::Stop { stopped_at } => cmd_stop(&db, stopped_at.as_deref()),
         Commands::Status { short } => cmd_status(&db, short),
         Commands::Log {

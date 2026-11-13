@@ -308,8 +308,9 @@ impl Database {
         entry_id: &str,
         started_at: Option<DateTime<Utc>>,
         stopped_at: Option<DateTime<Utc>>,
+        task_id: Option<i64>,
     ) -> Result<TimeEntry> {
-        let (task_id, current_started_at, current_stopped_at): (i64, String, Option<String>) = self
+        let (current_task_id, current_started_at, current_stopped_at): (i64, String, Option<String>) = self
             .conn
             .query_row(
                 "
@@ -328,6 +329,7 @@ impl Database {
         let started_at = started_at.unwrap_or_else(|| Self::parse_datetime(&current_started_at));
         let stopped_at =
             stopped_at.or_else(|| current_stopped_at.as_deref().map(Self::parse_datetime));
+        let task_id = task_id.unwrap_or(current_task_id);
 
         if let Some(stopped_at) = stopped_at
             && stopped_at < started_at
@@ -339,12 +341,14 @@ impl Database {
             "
             UPDATE time_entries
             SET started_at = ?1,
-                stopped_at = ?2
-            WHERE id = ?3
+                stopped_at = ?2,
+                task_id = ?3
+            WHERE id = ?4
             ",
             params![
                 started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                 stopped_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                task_id,
                 entry_id,
             ],
         )?;
@@ -355,6 +359,26 @@ impl Database {
             started_at,
             stopped_at,
         })
+    }
+
+    /// Get the project and task names of a time entry
+    pub fn get_entry_names(&self, entry_id: &str) -> Result<(String, String)> {
+        self.conn
+            .query_row(
+                "
+                SELECT p.name, t.name
+                FROM time_entries te
+                JOIN tasks t ON te.task_id = t.id
+                JOIN projects p ON t.project_id = p.id
+                WHERE te.id = ?1
+                ",
+                params![entry_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DbError::EntryNotFound,
+                _ => DbError::Sqlite(e),
+            })
     }
 
     /// Stop the currently active time entry

@@ -307,3 +307,41 @@ fn squash_keeps_fragments_separated_by_a_gap() {
         ]
     );
 }
+
+/// Returns the id of the first entry in `tm log --json` output.
+fn first_id(json: &str) -> String {
+    let rest = json.split("\"id\": \"").nth(1).expect("an entry id");
+    rest.split('"').next().expect("a closing quote").to_string()
+}
+
+#[test]
+fn amend_task_moves_entry_to_that_task_in_its_project() {
+    let tm = Tm::new();
+    tm.run(&["start", "acme", "review", "--at", "09:00"]);
+    tm.run(&["stop", "--at", "10:00"]);
+    let id = first_id(&tm.run(&["log", "--json"]).stdout);
+
+    let amend = tm.run(&["amend", &id, "--task", "write"]);
+    let log = tm.run(&["log", "--json"]);
+
+    assert_eq!(amend.code, Some(0), "{}", amend.stderr);
+    assert!(amend.stderr.is_empty(), "{}", amend.stderr);
+    assert_eq!(first_id(&log.stdout), id);
+    assert!(log.stdout.contains("\"project\": \"acme\""), "{}", log.stdout);
+    assert!(log.stdout.contains("\"task\": \"write\""), "{}", log.stdout);
+    assert!(log.stdout.contains("T09:00:00"), "{}", log.stdout);
+}
+
+#[test]
+fn amend_project_keeps_task_name() {
+    let tm = Tm::new();
+    tm.run(&["start", "acme", "review", "--at", "09:00"]);
+    tm.run(&["stop", "--at", "10:00"]);
+    let id = first_id(&tm.run(&["log", "--json"]).stdout);
+
+    tm.run(&["amend", &id, "--project", "globex"]);
+    let log = tm.run(&["log", "--json"]);
+
+    assert!(log.stdout.contains("\"project\": \"globex\""), "{}", log.stdout);
+    assert!(log.stdout.contains("\"task\": \"review\""), "{}", log.stdout);
+}
