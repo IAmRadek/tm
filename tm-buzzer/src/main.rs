@@ -220,8 +220,6 @@ enum Target {
 enum Edge {
     Start(usize),
     End(usize),
-    // the end of one entry where the next one starts; an edit moves both
-    Seam(usize, usize),
     // the end of the running entry, which is now and moves by itself
     Now(usize),
     // halfway between a stopped entry's start and end, where the entry is renamed or removed
@@ -276,6 +274,9 @@ struct App {
     project_turn: usize,
     // the playhead, in unix seconds
     at: i64,
+    // the edge the playhead holds when several edges share its second, as where one entry ends
+    // and the next starts
+    on: Option<Edge>,
     // the second in the middle of the view, easing toward at
     view: f64,
     // the playhead stays on now as now moves
@@ -517,7 +518,6 @@ impl App {
         let writes = match edge {
             Edge::Start(i) => vec![(id(i), "--started-at")],
             Edge::End(i) => vec![(id(i), "--stopped-at")],
-            Edge::Seam(a, b) => vec![(id(a), "--stopped-at"), (id(b), "--started-at")],
             Edge::Now(_) | Edge::Middle(_) => Vec::new(),
         };
         let mut ok = true;
@@ -528,28 +528,41 @@ impl App {
         ok
     }
 
-    // every edge and middle with its second, in time order; two entries that touch share one
-    // seam, and a running entry has no middle
+    // every edge and middle with its second, entry by entry in start order; where two entries
+    // touch, the end of one comes before the start of the next. A running entry has no middle
     fn edges(&self) -> Vec<(i64, Edge)> {
         let mut out = Vec::new();
         for (i, e) in self.entries.iter().enumerate() {
-            let touches_prev = i > 0 && self.entries[i - 1].stop == Some(e.start);
-            out.push((e.start.timestamp(), if touches_prev { Edge::Seam(i - 1, i) } else { Edge::Start(i) }));
+            out.push((e.start.timestamp(), Edge::Start(i)));
             match e.stop {
                 None => out.push((self.now(), Edge::Now(i))),
                 Some(stop) => {
                     out.push(((e.start.timestamp() + stop.timestamp()) / 2, Edge::Middle(i)));
-                    if !self.entries.get(i + 1).is_some_and(|n| n.start == stop) {
-                        out.push((stop.timestamp(), Edge::End(i)));
-                    }
+                    out.push((stop.timestamp(), Edge::End(i)));
                 }
             }
         }
         out
     }
 
-    fn edge_at(&self, t: i64) -> Option<Edge> {
-        self.edges().into_iter().find(|&(at, _)| at == t).map(|(_, e)| e)
+    fn edges_on(&self, t: i64) -> Vec<Edge> {
+        self.edges().into_iter().filter(|&(at, _)| at == t).map(|(_, e)| e).collect()
+    }
+
+    // the edge the playhead is on: of several on its second, the one it stepped onto
+    fn held(&self) -> Option<Edge> {
+        let here = self.edges_on(self.at);
+        self.on.filter(|e| here.contains(e)).or(here.first().copied())
+    }
+
+    // whether another entry touches the edge on its outer side, so no free time is beside it
+    fn walled(&self, edge: Edge) -> bool {
+        let n = self.entries.len();
+        match edge {
+            Edge::Start(i) => (0..n).any(|j| j != i && self.ended(j) == self.started(i)),
+            Edge::End(i) => (0..n).any(|j| j != i && self.started(j) == self.ended(i)),
+            Edge::Now(_) | Edge::Middle(_) => false,
+        }
     }
 
     fn inside(&self, t: i64) -> bool {
@@ -560,7 +573,6 @@ impl App {
     fn touched(&self, edge: Edge) -> Vec<usize> {
         match edge {
             Edge::Start(i) | Edge::End(i) | Edge::Now(i) | Edge::Middle(i) => vec![i],
-            Edge::Seam(a, b) => vec![a, b],
         }
     }
 
@@ -606,18 +618,24 @@ impl App {
         match edge {
             Edge::Start(i) => format!("{} start", task(i)),
             Edge::End(i) | Edge::Now(i) => format!("{} end", task(i)),
-            Edge::Seam(a, b) => format!("{} | {}", task(a), task(b)),
             Edge::Middle(i) => task(i).clone(),
         }
     }
 
     // one detent of the playhead: the next 5-minute mark outside the entries, or the next edge,
-    // now or midnight, whichever is closer. In a fast spin the marks are an hour apart, so a
-    // night takes a few detents; the edges, now and midnight still stop it. A playhead that
-    // moves to another day loads the entries around it
+    // now or midnight, whichever is closer. Edges on one second take a detent each, in the
+    // order of edges. In a fast spin the marks are an hour apart, so a night takes a few
+    // detents; the edges, now and midnight still stop it. A playhead that moves to another day
+    // loads the entries around it
     fn step(&mut self, dir: i64) {
         let fast = self.last_step.is_some_and(|(t, d)| d == dir && t.elapsed() < FAST);
         self.last_step = Some((Instant::now(), dir));
+        let here = self.edges_on(self.at);
+        let k = self.held().and_then(|h| here.iter().position(|&e| e == h));
+        if let Some(next) = k.and_then(|k| k.checked_add_signed(dir as isize)).and_then(|k| here.get(k)) {
+            self.on = Some(*next);
+            return;
+        }
         let stride = if fast { FAST_STEP } else { STEP };
         let grid = if dir > 0 { (self.at.div_euclid(stride) + 1) * stride } else { (self.at - 1).div_euclid(stride) * stride };
         let grid = Some(grid).filter(|&g| !self.inside(g));
@@ -632,6 +650,8 @@ impl App {
         if let Some(t) = [grid, edge].into_iter().flatten().min_by_key(|&t| (t - self.at).abs()) {
             self.at = t.clamp(self.now() - HISTORY, self.now() + AHEAD);
         }
+        let here = self.edges_on(self.at);
+        self.on = if dir > 0 { here.first() } else { here.last() }.copied();
         self.follow = self.at == self.now();
         if day_start(day_start(self.at) - 1) != self.from {
             self.load_entries();
@@ -655,7 +675,6 @@ impl App {
         let (lo, hi) = match edge {
             Edge::Start(i) => (prev_end(i), self.ended(i) - MIN_LEN),
             Edge::End(i) => (self.started(i) + MIN_LEN, next_start(i)),
-            Edge::Seam(a, b) => (self.started(a) + MIN_LEN, self.ended(b) - MIN_LEN),
             Edge::Now(_) | Edge::Middle(_) => return,
         };
         // an entry already shorter than MIN_LEN has lo past hi; with the edge's own second in
@@ -669,13 +688,10 @@ impl App {
         match edge {
             Edge::Start(i) => self.entries[i].start = at,
             Edge::End(i) => self.entries[i].stop = Some(at),
-            Edge::Seam(a, b) => {
-                self.entries[a].stop = Some(at);
-                self.entries[b].start = at;
-            }
             Edge::Now(_) | Edge::Middle(_) => {}
         }
         self.at = to;
+        self.on = Some(edge);
     }
 
     // the start and end of a new entry at the second at, None for an end that runs: it fills the
@@ -702,16 +718,17 @@ impl App {
         }
     }
 
-    // what a click on the timeline opens: an edge with free time beside it asks what to do, a
-    // seam has none and edits at once; a middle asks to rename or remove its entry; a gap and now
-    // pick a task to start there. An edge or middle of overlapping entries opens nothing
+    // what a click on the timeline opens: an edge with free time beside it asks what to do, an
+    // edge another entry touches has none and edits at once; a middle asks to rename or remove
+    // its entry; a gap and now pick a task to start there. An edge or middle of overlapping
+    // entries opens nothing
     fn click(&mut self) {
         let lanes = self.lanes();
-        match self.edge_at(self.at) {
+        match self.held() {
             Some(edge) if self.touched(edge).iter().any(|&i| lanes[i].1 > 1) => {
                 self.say("overlapping entries: fix them with tm")
             }
-            Some(edge @ Edge::Seam(..)) => self.go(Screen::Edit(edge, self.at), 0),
+            Some(edge) if self.walled(edge) => self.go(Screen::Edit(edge, self.at), 0),
             // the choices open on the first one after back
             Some(edge @ Edge::Start(_)) => self.go(Screen::Choose(edge, Side::Before), 1),
             Some(edge @ Edge::End(_)) => self.go(Screen::Choose(edge, Side::After), 1),
@@ -858,9 +875,10 @@ impl App {
                 self.go(Screen::Tasks(p), new);
             }
             // the edge goes back where it was: the entries come again from the database
-            Screen::Edit(_, from) => {
+            Screen::Edit(edge, from) => {
                 self.reload();
                 self.at = from;
+                self.on = Some(edge);
                 self.say("put back");
                 self.go(Screen::Timeline, 0);
             }
@@ -1325,6 +1343,7 @@ fn main() {
         scroll: 0.0,
         project_turn: 1,
         at: now,
+        on: None,
         view: now as f64,
         follow: true,
         pick: Pick::New(now, Side::After),
@@ -1543,7 +1562,7 @@ fn main() {
                 (start, Some(end)) => ("log", format!("{} - {} . {}", hm(start), hm(end), span(end - start))),
             },
         };
-        let edge = app.edge_at(app.at);
+        let edge = app.held();
         let (editing, from) = match app.screen {
             Screen::Edit(edge, from) => (Some(edge), Some(from)),
             _ => (None, None),
@@ -1585,7 +1604,7 @@ fn main() {
         };
         let hint = match (app.screen, edge) {
             (Screen::Tracking, _) => "turn: choose . click: go",
-            (Screen::Timeline, Some(Edge::Seam(..))) => "turn: 5m . click: edit seam . 2x: now . hold: close",
+            (Screen::Timeline, Some(e)) if app.walled(e) => "turn: 5m . click: edit edge . 2x: now . hold: close",
             (Screen::Timeline, Some(Edge::Middle(_))) => "turn: 5m . click: rename or remove . 2x: now",
             (Screen::Timeline, Some(_)) => "turn: 5m . click: edit or add . 2x: now . hold: close",
             (Screen::Timeline, None) if app.at == now_i => "turn: 5m . click: start task . hold: close",
@@ -1778,10 +1797,6 @@ fn main() {
                 match e {
                     Edge::Start(_) => serif(&mut d, 1.0),
                     Edge::End(_) | Edge::Now(_) => serif(&mut d, -1.0),
-                    Edge::Seam(_, _) => {
-                        serif(&mut d, 1.0);
-                        serif(&mut d, -1.0);
-                    }
                     // a middle is marked by short serifs on both sides
                     Edge::Middle(_) => {
                         for y in [LANE_Y - 4.0, LANE_Y + LANE_H + 2.0] {
@@ -1834,12 +1849,7 @@ fn main() {
                         let end = e.stop.map_or_else(|| "now".to_string(), |t| hm(t.timestamp()));
                         format!("{} - {end} . {}", hm(app.started(i)), span(app.ended(i) - app.started(i)))
                     };
-                    let length = |i: usize| span(app.ended(i) - app.started(i));
                     let (what, detail) = match focus {
-                        Some(Edge::Seam(a, b)) => (
-                            format!("{} | {}", app.entries[a].task, app.entries[b].task),
-                            format!("{}  |  {}", length(a), length(b)),
-                        ),
                         Some(Edge::Start(i)) => (format!("[ {}", app.entries[i].task), times(i)),
                         Some(Edge::End(i)) => (format!("{} ]", app.entries[i].task), times(i)),
                         Some(Edge::Now(i)) => (format!("{} > running", app.entries[i].task), times(i)),
