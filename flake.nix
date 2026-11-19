@@ -39,8 +39,10 @@
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "--package" "tm-buzzer" ];
           cargoTestFlags = [ "--package" "tm-buzzer" ];
-          # raylib-sys builds raylib with cmake and generates bindings with bindgen
-          nativeBuildInputs = [ pkgs.cmake pkgs.rustPlatform.bindgenHook ];
+          # raylib-sys builds raylib with cmake and generates bindings with bindgen;
+          # rusqlite links the nixpkgs sqlite, found through pkg-config
+          nativeBuildInputs = [ pkgs.cmake pkgs.rustPlatform.bindgenHook pkgs.pkg-config ];
+          buildInputs = [ pkgs.sqlite ];
           # cmake is for raylib-sys's build script, not for this crate
           dontUseCmakeConfigure = true;
           env.TM_BIN = "${tm}/bin/tm";
