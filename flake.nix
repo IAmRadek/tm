@@ -18,7 +18,9 @@
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "--package" pname ];
           cargoTestFlags = [ "--package" pname ];
-          nativeBuildInputs = [ pkgs.installShellFiles ];
+          # rusqlite links the nixpkgs sqlite, found through pkg-config
+          nativeBuildInputs = [ pkgs.installShellFiles pkgs.pkg-config ];
+          buildInputs = [ pkgs.sqlite ];
           postInstall = lib.optionalString (pname == "tm") ''
             installShellCompletion --cmd tm \
               --bash <($out/bin/tm completions bash) \
